@@ -1,0 +1,22 @@
+Checks: >
+  clang-analyzer-*,
+  performance-*,
+  readability-*,
+  cert-*,
+  misc-*,
+  -misc-non-private-member-variables-in-classes,
+  -misc-unused-parameters,
+  -misc-no-recursion,
+  -performance-avoid-endl,
+  -readability-identifier-length,
+  -readability-qualified-auto,
+  -readability-convert-member-functions-to-static,
+  -readability-math-missing-parentheses,
+
+WarningsAsErrors: ''
+HeaderFilterRegex: '^[^/]*'
+FormatStyle:     none
+
+CheckOptions:    
+  - key:             readability-function-cognitive-complexity.Threshold
+    value:           '10'
