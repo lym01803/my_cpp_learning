@@ -12,6 +12,7 @@ Checks: >
   -readability-qualified-auto,
   -readability-convert-member-functions-to-static,
   -readability-math-missing-parentheses,
+  -readability-magic-numbers,
 
 WarningsAsErrors: ''
 HeaderFilterRegex: '^[^/]*'
