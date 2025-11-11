@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <concepts>
-#include <functional>
+#include <vector>
 #include <optional>
 #include <ranges>
 #include <iostream>
@@ -44,14 +44,10 @@ inline auto get_right_triangle_triples(int n) {
 }
 
 inline void ranges_sort(int n) {
-    auto res = get_right_triangle_triples(n);
-    using triple = std::tuple<long long, long long, long long>;
-    std::vector<triple> vec {std::from_range, res};
-    std::ranges::sort(vec, std::ranges::less {}, 
-        [](const auto &t) { return std::get<0>(t); });
+    std::vector vec {std::from_range, get_right_triangle_triples(n)};
+    std::ranges::sort(vec, std::ranges::less {}, [](const auto &t) { return std::get<0>(t); });
     for (const auto &t : vec) {
-        std::cout << std::get<0>(t) << " "
-            << std::get<1>(t) << " "
+        std::cout << std::get<0>(t) << " " << std::get<1>(t) << " "
             << std::get<2>(t) << std::endl;
     }
     std::cout << std::endl;
