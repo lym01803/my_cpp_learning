@@ -5,8 +5,8 @@ project(learn_cpp_ranges)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-set(CMAKE_AR "/opt/homebrew/opt/llvm/bin/llvm-ar" CACHE FILEPATH "Path to ar" FORCE)
-set(CMAKE_RANLIB "/opt/homebrew/opt/llvm/bin/llvm-ranlib" CACHE FILEPATH "Path to ranlib" FORCE)
+# set(CMAKE_AR "/opt/homebrew/opt/llvm/bin/llvm-ar" CACHE FILEPATH "Path to ar" FORCE)
+# set(CMAKE_RANLIB "/opt/homebrew/opt/llvm/bin/llvm-ranlib" CACHE FILEPATH "Path to ranlib" FORCE)
 
 if (CMAKE_BUILD_TYPE STREQUAL "Coverage")
     # llvm coverage test
