@@ -1,3 +1,8 @@
 {
-    "clangd.path": "/usr/bin/clangd"
+    "clangd.path": "/opt/homebrew/opt/llvm/bin/clangd",
+    "[cpp]": {
+        "editor.formatOnSave": true,
+        "editor.indentSize": "tabSize",
+        "editor.tabSize": 2
+    }
 }
