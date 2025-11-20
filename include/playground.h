@@ -1,11 +1,16 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <concepts>
+#include <exception>
+#include <functional>
+#include <mutex>
 #include <vector>
 #include <optional>
 #include <ranges>
 #include <iostream>
+#include <thread>
 
 namespace playground {
 
@@ -51,6 +56,62 @@ inline void ranges_sort(int n) {
             << std::get<2>(t) << std::endl;
     }
     std::cout << std::endl;
+}
+
+void try_concurrency();
+
+void try_mutex();
+
+class guarded_thread {
+    std::thread t;
+public:
+    guarded_thread(std::thread t): t(std::move(t)) {}
+    guarded_thread(const guarded_thread &other) = delete;
+    guarded_thread(guarded_thread &&other) noexcept = default;
+    guarded_thread & operator = (const guarded_thread &other) = delete;
+    guarded_thread & operator = (guarded_thread &&other) noexcept {
+        if (t.joinable()) {
+            try {
+                t.join();
+            } catch (...) {
+                std::terminate();
+            }
+        }
+        t = std::move(other.t);
+        return *this;
+    }
+
+    ~guarded_thread() {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+
+    std::thread & operator *() noexcept {
+        return t;
+    }
+    std::thread const & operator *() const noexcept {
+        return t;
+    }
+    std::thread * operator ->() noexcept {
+        return &t;
+    }
+    std::thread const * operator ->() const noexcept {
+        return &t;
+    }
+    std::thread release() noexcept {
+        return std::move(t);
+    }
+};
+
+template <std::invocable F>
+    requires std::move_constructible<F>
+auto timer_wrap(F f) {
+    return [f = std::move(f)]() mutable {
+        const auto start_time = std::chrono::high_resolution_clock::now();
+        std::invoke(f);
+        return std::chrono::high_resolution_clock::now() - start_time;
+    };
 }
 
 } // namespace playground
