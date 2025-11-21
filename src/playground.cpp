@@ -121,4 +121,20 @@ void try_mutex() {
   }
 }
 
+void play_with_matrix() {
+  Matrix2D<int> m{3, 4};
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 4; j++) {
+      m[i, j] = (i + 1) * (j + 1);
+    }
+  }
+  Matrix2D<int> m2(m);
+  m2[2, 3] = -1;
+  std::cout << m << std::endl;
+  std::cout << m2 << std::endl;
+  Matrix2D<double> n(m);
+  n[0, 0] = 3.14;
+  std::cout << n << std::endl;
+}
+
 }  // namespace playground

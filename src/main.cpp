@@ -8,5 +8,6 @@ int main() {
   // playground::ranges_sort(10);
   // playground::try_concurrency();
   playground::try_mutex();
+  playground::play_with_matrix();
   return 0;
 }
