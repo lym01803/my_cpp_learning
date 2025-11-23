@@ -216,4 +216,6 @@ struct Matrix2D {
 
 void play_with_matrix();
 
+void try_shared_mutex();
+
 }  // namespace playground

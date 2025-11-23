@@ -9,9 +9,11 @@
 #include <optional>
 #include <ranges>
 #include <ratio>
+#include <shared_mutex>
 #include <stdexcept>
 #include <thread>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 
 namespace playground {
@@ -135,6 +137,47 @@ void play_with_matrix() {
   Matrix2D<double> n(m);
   n[0, 0] = 3.14;
   std::cout << n << std::endl;
+}
+
+void try_shared_mutex() {
+  std::shared_mutex s_mutex;
+  std::vector arr{std::from_range, std::views::iota(1LL, 1000LL + 1LL)};
+  auto get_sum = [&s_mutex](const auto& arr, size_t N) {
+    typename std::remove_cvref_t<decltype(arr)>::value_type sum = 0;
+    std::shared_lock<std::shared_mutex> lock{s_mutex};
+    for (size_t i = 0; i < N; i++) {
+      if (i % 100 == 0) {
+        lock.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        lock.lock();
+      }
+      sum += arr[i];
+    }
+    return sum;
+  };
+  auto modify_arr = [&s_mutex](auto& arr, size_t N) {
+    std::unique_lock<std::shared_mutex> lock{s_mutex};
+    for (size_t i = 0; i < N; i++) {
+      if (i % 100 == 0) {
+        lock.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        lock.lock();
+      }
+      arr[i] += 1;
+    }
+  };
+  guarded_thread reader_1{std::thread{[&s_mutex, &arr, &get_sum]() {
+    auto result = get_sum(arr, arr.size());
+    std::cout << "reader 1 sum: " << result
+              << std::endl;  // expect: 500500 + 100 * k
+  }}};
+  guarded_thread reader_2{std::thread{[&s_mutex, &arr, &get_sum]() {
+    auto result = get_sum(arr, arr.size());
+    std::cout << "reader 2 sum: " << result
+              << std::endl;  // expect: 500500 + 100 * k
+  }}};
+  guarded_thread writer{std::thread{
+      [&s_mutex, &arr, &modify_arr]() { modify_arr(arr, arr.size()); }}};
 }
 
 }  // namespace playground
