@@ -12,6 +12,7 @@
 #include <ranges>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace playground {
@@ -19,8 +20,7 @@ namespace playground {
 template <std::semiregular T>
 struct optional_view : public std::ranges::view_interface<optional_view<T>> {
   optional_view() = default;
-  optional_view(T data) : data(std::move(data)) {
-  }
+  optional_view(T data) : data(std::move(data)) {}
 
   T const* begin() const noexcept {
     return data ? &data.value() : nullptr;
@@ -71,8 +71,7 @@ class guarded_thread {
   std::thread t;
 
  public:
-  guarded_thread(std::thread t) : t(std::move(t)) {
-  }
+  guarded_thread(std::thread t) : t(std::move(t)) {}
   guarded_thread(const guarded_thread& other) = delete;
   guarded_thread(guarded_thread&& other) noexcept = default;
   guarded_thread& operator=(const guarded_thread& other) = delete;
@@ -215,5 +214,57 @@ struct Matrix2D {
 };
 
 void play_with_matrix();
+
+void play_with_tick_timer();
+
+struct tick_timer {
+  using duration_t = std::chrono::nanoseconds;
+  using time_point_t = std::chrono::high_resolution_clock::time_point;
+
+  tick_timer() {}
+  tick_timer(const tick_timer& other) : interval{other.interval} {}
+  tick_timer(tick_timer&& other) noexcept = default;
+  tick_timer& operator=(const tick_timer& other) noexcept {
+    if (this == &other) {
+      return *this;
+    }
+    interval = other.interval;
+    return *this;
+  }
+  tick_timer& operator=(tick_timer&& other) noexcept = default;
+  ~tick_timer() {
+    running = false;
+  }
+
+  template <typename R, typename P>
+  tick_timer(const std::chrono::duration<R, P>& interval)
+      : interval{interval} {}
+
+  template <typename R, typename P>
+    requires requires(duration_t t, const std::chrono::duration<R, P>& other) {
+      t = other;
+    }
+  tick_timer& operator=(const std::chrono::duration<R, P>& interval) noexcept {
+    this->interval = interval;
+    return *this;
+  }
+
+  time_point_t operator()() const noexcept {
+    return time_point;
+  }
+
+ private:
+  duration_t interval{std::chrono::milliseconds(1)};
+  time_point_t time_point{std::chrono::high_resolution_clock::now()};
+  bool running{true};
+  guarded_thread th{std::thread{[this]() { this->tick(); }}};
+
+  void tick() {
+    while (running) {
+      time_point = std::chrono::high_resolution_clock::now();
+      std::this_thread::sleep_for(interval);
+    }
+  }
+};
 
 }  // namespace playground

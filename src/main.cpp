@@ -7,7 +7,8 @@ int main() {
   // playground::get_right_triangle_triples(10);
   // playground::ranges_sort(10);
   // playground::try_concurrency();
-  playground::try_mutex();
-  playground::play_with_matrix();
+  // playground::try_mutex();
+  // playground::play_with_matrix();
+  playground::play_with_tick_timer();
   return 0;
 }

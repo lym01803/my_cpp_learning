@@ -3,16 +3,20 @@
 #include <algorithm>
 #include <chrono>
 #include <concepts>
+#include <cstddef>
 #include <exception>
 #include <iostream>
+#include <mdspan>
 #include <mutex>
 #include <optional>
 #include <ranges>
 #include <ratio>
+#include <span>
 #include <stdexcept>
 #include <thread>
 #include <tuple>
 #include <utility>
+#include <version>
 
 namespace playground {
 
@@ -129,12 +133,40 @@ void play_with_matrix() {
     }
   }
   Matrix2D<int> m2(m);
-  m2[2, 3] = -1;
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 4; j++) {
+      m2[i, j] = -m2[i, j];
+    }
+  }
   std::cout << m << std::endl;
   std::cout << m2 << std::endl;
   Matrix2D<double> n(m);
   n[0, 0] = 3.14;
   std::cout << n << std::endl;
+  Matrix2D<int> m3{3, 4};
+  std::cout << m3 << std::endl;
+  m3 = std::move(m);
+  std::cout << m3 << std::endl;
+
+  std::vector<int> data{std::from_range, std::views::iota(1, 12 + 1)};
+  std::mdspan views{data.data(), 3, 4};
+  views[0, 0] = 0;
+  for (int i = 0; i < views.extent(0); i++) {
+    for (int j = 0; j < views.extent(1); j++) {
+      std::cout << views[i, j] << " ";
+    }
+    std::cout << "\n";
+  }
+  std::cout << std::endl;
+}
+
+void play_with_tick_timer() {
+  tick_timer timer {};
+  auto t = timer();
+  for (int i = 0; i < 100; i++) {
+    std::cout << timer() - t<< std::endl;
+    std::this_thread::sleep_for(std::chrono::microseconds {300});
+  }
 }
 
 }  // namespace playground
