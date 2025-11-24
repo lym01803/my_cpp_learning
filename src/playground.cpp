@@ -7,6 +7,7 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <ranges>
 #include <ratio>
 #include <shared_mutex>
@@ -142,42 +143,35 @@ void play_with_matrix() {
 void try_shared_mutex() {
   std::shared_mutex s_mutex;
   std::vector arr{std::from_range, std::views::iota(1LL, 1000LL + 1LL)};
-  auto get_sum = [&s_mutex](const auto& arr, size_t N) {
-    typename std::remove_cvref_t<decltype(arr)>::value_type sum = 0;
+  std::mt19937_64 gen{std::random_device{}()};
+  std::uniform_int_distribution dist(0, 100);
+
+  const auto sum_with_shared_mutex = [](const auto& data,
+                                        std::shared_mutex& s_mutex) {
     std::shared_lock<std::shared_mutex> lock{s_mutex};
-    for (size_t i = 0; i < N; i++) {
-      if (i % 100 == 0) {
-        lock.unlock();
-        std::this_thread::sleep_for(std::chrono::milliseconds{100});
-        lock.lock();
-      }
-      sum += arr[i];
-    }
-    return sum;
+    return std::ranges::fold_left(
+        data, 0LL, [](long long s, long long item) { return s + item; });
   };
-  auto modify_arr = [&s_mutex](auto& arr, size_t N) {
+  const auto add_with_shared_mutex = [](auto& data,
+                                        std::shared_mutex& s_mutex) {
     std::unique_lock<std::shared_mutex> lock{s_mutex};
-    for (size_t i = 0; i < N; i++) {
-      if (i % 100 == 0) {
-        lock.unlock();
-        std::this_thread::sleep_for(std::chrono::milliseconds{100});
-        lock.lock();
-      }
-      arr[i] += 1;
-    }
+    std::ranges::for_each(data, [](long long& item) { item += 1; });
   };
-  guarded_thread reader_1{std::thread{[&s_mutex, &arr, &get_sum]() {
-    auto result = get_sum(arr, arr.size());
-    std::cout << "reader 1 sum: " << result
-              << std::endl;  // expect: 500500 + 100 * k
+
+  guarded_thread reader_1{std::thread{[&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds{dist(gen)});
+    auto res = sum_with_shared_mutex(arr, s_mutex);
+    std::cout << "reader_1 sum: " << res << std::endl;
   }}};
-  guarded_thread reader_2{std::thread{[&s_mutex, &arr, &get_sum]() {
-    auto result = get_sum(arr, arr.size());
-    std::cout << "reader 2 sum: " << result
-              << std::endl;  // expect: 500500 + 100 * k
+  guarded_thread reader_2{std::thread{[&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds{dist(gen)});
+    auto res = sum_with_shared_mutex(arr, s_mutex);
+    std::cout << "reader_2 sum: " << res << std::endl;
   }}};
-  guarded_thread writer{std::thread{
-      [&s_mutex, &arr, &modify_arr]() { modify_arr(arr, arr.size()); }}};
+  guarded_thread writer{std::thread{[&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds{dist(gen)});
+    add_with_shared_mutex(arr, s_mutex);
+  }}};
 }
 
 }  // namespace playground
