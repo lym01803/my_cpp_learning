@@ -33,11 +33,15 @@ add_library(playground STATIC src/playground.cpp)
 target_include_directories(playground PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(playground PRIVATE ${CMAKE_SOURCE_DIR}/external)
 
+add_library(message_obj STATIC src/message.cpp)
+target_include_directories(message_obj PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(message_obj PRIVATE ${CMAKE_SOURCE_DIR}/external)
+
 # Compile main app
 add_executable(main src/main.cpp)
 target_include_directories(main PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(main PRIVATE ${CMAKE_SOURCE_DIR}/external)
-target_link_libraries(main PRIVATE playground)
+target_link_libraries(main PRIVATE playground message_obj)
 
 
 option(RUN_CLANG_TIDY "run clang-tidy" OFF)

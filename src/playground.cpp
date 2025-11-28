@@ -3,10 +3,14 @@
 #include <algorithm>
 #include <chrono>
 #include <concepts>
+#include <condition_variable>
 #include <exception>
+#include <functional>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <queue>
 #include <random>
 #include <ranges>
 #include <ratio>
@@ -16,6 +20,8 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+
+#include "message.h"
 
 namespace playground {
 
@@ -178,6 +184,81 @@ void try_shared_mutex() {
     guarded_thread reader_2{std::thread{tagged_timer_wrap("reader 2", reader_task)}};
     guarded_thread writer{std::thread{tagged_timer_wrap("writer", writer_task)}};
   })();
+}
+
+void try_condition_variable() {
+  std::condition_variable cv;
+  std::optional<int> x{};
+  std::mutex data_mutex;
+
+  guarded_thread reader{std::thread{[&]() {
+    std::unique_lock lock{data_mutex};
+    const auto d = std::chrono::milliseconds{1000};
+    for (int i = 0; i < 5; i++) {
+      if (cv.wait_for(lock, d, [&]() { return x.has_value(); })) {
+        std::cout << std::format("i = {}, x = {}\n", i, *x);
+        x = std::nullopt;
+      }
+    }
+  }}};
+
+  guarded_thread writer{std::thread{[&]() {
+    const auto d = std::chrono::milliseconds{500};
+    for (int i = 0; i < 5; i++) {
+      // 模拟耗时
+      std::this_thread::sleep_for(d);
+      {
+        std::lock_guard lock{data_mutex};
+        x = i;
+        cv.notify_all();
+      }
+    }
+  }}};
+}
+
+void try_condition_variable_with_stop() {  // NOLINT(readability-function-cognitive-complexity)
+  const auto N = 1000'000'000LL;
+  std::vector data{std::from_range, std::views::iota(1LL, N + 1LL)};
+  std::queue<long long> queue;
+  std::mutex mutex;
+  stopable_cv cv;
+
+  auto fetch_and_output = [](auto& queue) {
+    while (!queue.empty()) {
+      const auto front = queue.front();
+      queue.pop();
+      std::cout << front << " ";
+    }
+    std::cout << std::endl;
+  };
+
+  guarded_thread reader{std::thread{[&]() {
+    std::unique_lock lock{mutex};
+    while (true) {
+      cv->wait(lock, [&]() { return !queue.empty() || cv.is_stoped(); });
+      if (!queue.empty()) {
+        fetch_and_output(queue);
+      } else {
+        break;
+      }
+    }
+  }}};
+
+  guarded_thread writer{std::thread{[&]() {
+    for (int i = 0; i < 5; i++) {
+      long long sum = std::ranges::fold_left(data, 0LL, std::plus{});
+      {
+        std::lock_guard lock{mutex};
+        queue.push(sum);
+        cv->notify_one();
+      }
+    }
+    cv.stop();
+  }}};
+}
+
+void try_message() {
+  
 }
 
 }  // namespace playground
