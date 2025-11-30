@@ -17,6 +17,8 @@
 #include <ranges>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "message.h"
@@ -258,14 +260,88 @@ struct stopable_cv {
 
 namespace msg {
 
+enum class toy_msg : uint8_t { _int, _double, _string, _vec_int };
 
-  
-}  // namespace message
+}  // namespace msg
 
 namespace playground {
 
-template <typename T>
-class async_stream {};
+struct default_id_generator {
+  size_t current_id{};
+  size_t operator()() noexcept {
+    return ++current_id;
+  }
+};
+
+struct default_timestamp_generator {
+  using time_point_t = std::chrono::time_point<std::chrono::system_clock>;
+  time_point_t operator()() noexcept {
+    return std::chrono::system_clock::now();
+  }
+};
+
+template <typename T, std::invocable IDGen = default_id_generator,
+          std::invocable TSGen = default_timestamp_generator>
+  requires requires(T t) {
+    t.serial_number = std::declval<IDGen>()();
+    t.timestamp = std::declval<TSGen>()();
+  } && std::is_default_constructible_v<IDGen> && std::is_default_constructible_v<TSGen>
+class async_stream {
+  using msg_t = T;
+
+  IDGen id_gen{};
+  TSGen ts_gen{};
+  std::mutex mutex;
+  stopable_cv cv;
+  std::deque<T> queue;
+
+ public:
+  template <typename U>
+    requires requires(U&& data) { msg_t{std::forward<U>(data)}; }
+  async_stream& operator<<(U&& data) {
+    msg_t msg{std::forward<U>(data)};
+    {
+      std::lock_guard lock{mutex};
+      msg.serial_number = id_gen();
+      msg.timestamp = ts_gen();
+      queue.push_back(std::move(msg));
+    }
+    cv->notify_one();
+    return *this;
+  }
+
+  async_stream& operator>>(T& data) {
+    std::unique_lock lock{mutex};
+    cv->wait(lock, [this]() { return !queue.empty() || cv.is_stoped(); });
+    if (!queue.empty()) {
+      get_front(data);
+    }
+    return *this;
+  }
+
+  operator bool() const noexcept {
+    return queue || !cv.is_stoped();
+  }
+
+ private:
+  void get_front(T& data) {
+    if constexpr (std::is_nothrow_move_assignable_v<T>) {  // move assign
+      data = std::move(queue.front());
+      queue.pop_front();
+    } else if constexpr (std::is_nothrow_copy_assignable_v<T>) {  // copy assign
+      data = queue.front();
+      queue.pop_front();
+    } else if constexpr (std::is_copy_constructible_v<T> &&
+                         std::is_swappable_v<T>) {  // copy and swap
+      T front(queue.front());
+      std::swap(data, front);
+      queue.pop_front();
+    } else {  // data may be invalid when exceptions occur
+      data = queue.front();
+      queue.pop_front();
+    }
+  }
+};
 
 void try_message();
 

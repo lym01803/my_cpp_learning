@@ -6,7 +6,9 @@
 #include <condition_variable>
 #include <exception>
 #include <functional>
+#include <initializer_list>
 #include <iostream>
+#include <locale>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -20,6 +22,7 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
 #include "message.h"
 
@@ -257,8 +260,84 @@ void try_condition_variable_with_stop() {  // NOLINT(readability-function-cognit
   }}};
 }
 
+namespace {
+
+template <typename... Ts>
+struct temp_visitor : public Ts... {
+  using Ts::operator()...;
+};
+
+template <typename... Ts>
+temp_visitor(Ts...) -> temp_visitor<Ts...>;  // pass value
+
+class arr_msg {
+  std::shared_ptr<std::vector<int>> data_ptr;
+
+ public:
+  arr_msg() = default;
+  arr_msg(std::shared_ptr<std::vector<int>> ptr) : data_ptr{std::move(ptr)} {}
+  std::vector<int>& data() noexcept {  // NOLINT(readability-make-member-function-const)
+    return *data_ptr;
+  }
+  const std::vector<int>& data() const noexcept {
+    return *data_ptr;
+  }
+};
+
+}  // namespace
+
 void try_message() {
-  
+  using msg_v_t = std::variant<std::monostate, double, int, std::string, char, arr_msg,
+                               std::pair<double, double>>;
+  using msg_t = msg::message<msg_v_t>;
+  std::vector<msg_t> messages;
+  messages.reserve(7);
+
+  messages.emplace_back(3.14, 1);
+  messages.emplace_back(12345, 2);
+  messages.emplace_back("Hello, world!", 3);
+  messages.emplace_back('c', 4);
+  auto arr_ptr = std::make_shared<std::vector<int>>(std::initializer_list{-1, 0, 1});
+  messages.emplace_back(arr_msg{std::move(arr_ptr)}, 5);
+  messages.emplace_back(std::make_pair(2.71828, 3.14159), 6);
+  messages.emplace_back(msg_t{.serial_number = 7});
+
+  auto inplace_modify = temp_visitor{[](auto& data) { /* fallback, do nothing */ },
+                                     [](std::string& data) { data += "[suffix]"; },
+                                     [](arr_msg& data) {
+                                       auto& arr = data.data();
+                                       const auto size = arr.size();
+                                       // append #size numbers
+                                       for (size_t i = 0; i < size; i++) {
+                                         arr.emplace_back(1 + *arr.rbegin());
+                                       }
+                                     }};
+
+  auto output = temp_visitor{[](const auto& data) { /* fallback, do nothing */ },
+                             [](double data) { std::cout << data << std::endl; },
+                             [](int data) { std::cout << data << std::endl; },
+                             [](const std::string& data) { std::cout << data << std::endl; },
+                             [](char data) { std::cout << data << std::endl; },
+                             [](const arr_msg& data) {
+                               const auto& arr = data.data();
+                               for (const auto& item : arr) {
+                                 std::cout << item << " ";
+                               }
+                               std::cout << std::endl;
+                             },
+                             [](const std::pair<double, double>& data) {
+                               std::cout << std::format("({}, {})", data.first, data.second)
+                                         << std::endl;
+                             }};
+
+  std::ranges::sort(messages, std::greater<msg_t>{});  // sort by serial number in descending order
+  // here filter is unnecessary, since visitor has fallback branch. only to show the usage of
+  // msg_t::data_t_in<>();
+  std::ranges::for_each(messages | std::views::filter([](const msg_t& m) {
+                          return m.data_t_in<std::string, arr_msg>();
+                        }),
+                        [&](msg_t& m) { std::visit(std::move(inplace_modify), m.data); });
+  std::ranges::for_each(messages, [&](const msg_t& m) { std::visit(std::move(output), m.data); });
 }
 
 }  // namespace playground

@@ -11,7 +11,7 @@ int main() {
   // playground::play_with_matrix();
   // playground::try_shared_mutex();
   // playground::try_condition_variable();
-  playground::try_condition_variable_with_stop();
-  // playground::try_message();
+  // playground::try_condition_variable_with_stop();
+  playground::try_message();
   return 0;
 }
