@@ -1,6 +1,7 @@
 #include <playground.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <concepts>
 #include <condition_variable>
@@ -339,5 +340,90 @@ void try_message() {
                         [&](msg_t& m) { std::visit(std::move(inplace_modify), m.data); });
   std::ranges::for_each(messages, [&](const msg_t& m) { std::visit(std::move(output), m.data); });
 }
+
+namespace {
+
+struct counter_controller {
+  std::atomic<int> count{0};
+  std::function<void()> callback;
+  operator int() const noexcept {
+    return count;
+  }
+  counter_controller& operator++() noexcept {
+    ++count;
+    return *this;
+  }
+  counter_controller& operator--() {
+    if (--count == 0) {
+      callback();
+    }
+    return *this;
+  }
+  struct guard {
+    counter_controller& ctrl;
+    guard(counter_controller& ctrl) noexcept : ctrl{ctrl} {
+      ++ctrl;
+    }
+    ~guard() {
+      --ctrl;
+    }
+  };
+};
+
+struct sum_msg {
+  size_t value;
+};
+
+struct square_sum_msg {
+  size_t value;
+};
+
+}  // namespace
+
+void try_async_stream() {
+  const auto N = 100'000'000LL;
+  const size_t mod = 998244353;
+  std::vector data{std::from_range, std::views::iota(1LL, N + 1LL)};
+
+  using msg_t = msg::message<std::variant<std::monostate, sum_msg, square_sum_msg>>;
+  async_stream<msg_t> as;
+  counter_controller counter{.callback = [&]() { as.stop(); }};
+
+  guarded_thread task1{std::thread{[&]() {
+    counter_controller::guard guard{counter};
+    for (int i = 0; i < 5; i++) {
+      as.write_sync(sum_msg{std::ranges::fold_left(data, (size_t)0, std::plus<size_t>{})});
+    }
+  }}};
+
+  guarded_thread task2{std::thread{[&]() {
+    counter_controller::guard guard{counter};
+    for (int i = 0; i < 5; i++) {
+      as.write_sync(square_sum_msg{std::ranges::fold_left(data, (size_t)0, [](size_t s, size_t v) {
+        auto res = s + (v * v % mod);
+        res = res >= mod ? res - mod : res;
+        res = res < 0 ? res + mod : res;
+        return res;
+      })});
+    }
+  }}};
+
+  auto output =
+      temp_visitor{[](const auto& data) {},
+                   [](const sum_msg& data) { std::cout << "sum = " << data.value << std::endl; },
+                   [](const square_sum_msg& data) {
+                     std::cout << "moded square sum = " << data.value << std::endl;
+                   }};
+  guarded_thread output_task{std::thread{[&]() {
+    while (as) {
+      msg_t msg;
+      if (as.read_sync(msg) == async_stream<msg_t>::status::good) {
+        std::visit(output, msg.data);
+      }
+    }
+  }}};
+}
+
+void try_coroutine() {}
 
 }  // namespace playground

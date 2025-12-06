@@ -6,13 +6,17 @@
 #include <chrono>
 #include <concepts>
 #include <condition_variable>
+#include <coroutine>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <ostream>
 #include <queue>
 #include <ranges>
 #include <stdexcept>
@@ -266,6 +270,136 @@ enum class toy_msg : uint8_t { _int, _double, _string, _vec_int };
 
 namespace playground {
 
+template <typename T = void>
+struct coroutine_object;
+
+template <>
+struct coroutine_object<void> {
+  struct promise_type {
+    bool done{false};
+    auto get_return_object() {
+      return coroutine_object{std::coroutine_handle<promise_type>::from_promise(*this)};
+    }
+    auto initial_suspend() {
+      return std::suspend_never{};
+    }
+    auto final_suspend() noexcept {
+      return std::suspend_always{};
+    }
+    void return_void() {
+      done = true;
+    }
+    void unhandled_exception() {}
+  };
+
+  coroutine_object() = default;
+  coroutine_object(std::coroutine_handle<promise_type> co_handle) : co_handle{co_handle} {}
+  coroutine_object(const coroutine_object& other) = delete;
+  coroutine_object(coroutine_object&& other) noexcept : co_handle{other.co_handle} {
+    other.co_handle = nullptr;
+  }
+  coroutine_object& operator=(const coroutine_object& other) = delete;
+  coroutine_object& operator=(coroutine_object&& other) noexcept {
+    co_handle = other.co_handle;
+    other.co_handle = nullptr;
+    return *this;
+  }
+
+  ~coroutine_object() {
+    if (co_handle) {
+      co_handle.destroy();
+    }
+  }
+
+  void get() const {  // block
+    co_handle.resume();
+  }
+
+  std::coroutine_handle<promise_type> co_handle;
+};
+
+template <typename T>
+  requires(!std::is_same_v<T, void>) && std::is_move_assignable_v<T>
+struct coroutine_object<T> {
+  struct promise_type {
+    std::optional<T> value;
+    auto get_return_object() {
+      return coroutine_object{std::coroutine_handle<promise_type>::from_promise(*this)};
+    }
+    auto initial_suspend() {
+      return std::suspend_never{};
+    }
+    auto final_suspend() noexcept {
+      return std::suspend_always{};
+    }
+    void return_value(T value) {
+      this->value = std::move(value);
+    }
+    void unhandled_exception() {}
+  };
+
+  coroutine_object() = default;
+  coroutine_object(std::coroutine_handle<promise_type> co_handle) : co_handle{co_handle} {}
+  coroutine_object(const coroutine_object& other) = delete;
+  coroutine_object(coroutine_object&& other) noexcept : co_handle{other.co_handle} {
+    other.co_handle = nullptr;
+  }
+  coroutine_object& operator=(const coroutine_object& other) = delete;
+  coroutine_object& operator=(coroutine_object&& other) noexcept {
+    co_handle = other.co_handle;
+    other.co_handle = nullptr;
+    return *this;
+  }
+
+  ~coroutine_object() {
+    if (co_handle) {
+      co_handle.destroy();
+    }
+  }
+
+  std::optional<T> get() const {  // block
+    co_handle.resume();
+    return co_handle.promise().value;
+  }
+
+  std::coroutine_handle<promise_type> co_handle;
+};
+
+template <typename Suspend, typename Ready, typename Resume>
+  requires requires(Suspend suspend, const Ready& ready, Resume resume) {
+    { suspend() } -> std::same_as<void>;
+    { ready() } -> std::same_as<bool>;
+    { resume() } -> std::same_as<void>;
+  }
+struct detach_thread_awaitable : public Suspend, Ready, Resume {
+  std::optional<guarded_thread> th;
+  detach_thread_awaitable(Suspend suspend, Ready ready = Ready{}, Resume resume = Resume{})
+      : Suspend{std::move(suspend)}, Ready{std::move(ready)}, Resume{std::move(resume)} {}
+  bool await_ready() const noexcept {
+    return Ready::operator()();
+  }
+  void await_suspend(std::coroutine_handle<> h) {
+    th = guarded_thread{std::thread{[&]() { Suspend::operator()(); }}};
+  }
+  void await_resume() {
+    if (th && (*th)->joinable()) {
+      (*th)->join();
+    }
+    Resume::operator()();
+  }
+};
+
+template <typename Suspend, typename Ready, typename Resume>
+detach_thread_awaitable(Suspend, Ready, Resume) -> detach_thread_awaitable<Suspend, Ready, Resume>;
+
+template <typename Suspend, typename Ready>
+detach_thread_awaitable(Suspend, Ready)
+    -> detach_thread_awaitable<Suspend, Ready, decltype([]() {})>;
+
+template <typename Suspend>
+detach_thread_awaitable(Suspend)
+    -> detach_thread_awaitable<Suspend, decltype([]() { return false; }), decltype([]() {})>;
+
 struct default_id_generator {
   size_t current_id{};
   size_t operator()() noexcept {
@@ -279,6 +413,8 @@ struct default_timestamp_generator {
     return std::chrono::system_clock::now();
   }
 };
+
+enum class async_stream_read_write_status : std::uint8_t { empty, good };
 
 template <typename T, std::invocable IDGen = default_id_generator,
           std::invocable TSGen = default_timestamp_generator>
@@ -296,9 +432,11 @@ class async_stream {
   std::deque<T> queue;
 
  public:
+  using status = async_stream_read_write_status;  // template params independent
+
   template <typename U>
     requires requires(U&& data) { msg_t{std::forward<U>(data)}; }
-  async_stream& operator<<(U&& data) {
+  status write_sync(U&& data) {
     msg_t msg{std::forward<U>(data)};
     {
       std::lock_guard lock{mutex};
@@ -307,20 +445,25 @@ class async_stream {
       queue.push_back(std::move(msg));
     }
     cv->notify_one();
-    return *this;
+    return status::good;
   }
 
-  async_stream& operator>>(T& data) {
+  status read_sync(T& data) {
     std::unique_lock lock{mutex};
     cv->wait(lock, [this]() { return !queue.empty() || cv.is_stoped(); });
     if (!queue.empty()) {
       get_front(data);
+      return status::good;
     }
-    return *this;
+    return status::empty;
   }
 
   operator bool() const noexcept {
-    return queue || !cv.is_stoped();
+    return !queue.empty() || !cv.is_stoped();
+  }
+
+  void stop() {
+    cv.stop();
   }
 
  private:
@@ -344,5 +487,9 @@ class async_stream {
 };
 
 void try_message();
+
+void try_async_stream();
+
+void try_coroutine();
 
 }  // namespace playground

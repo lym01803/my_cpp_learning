@@ -12,6 +12,8 @@ int main() {
   // playground::try_shared_mutex();
   // playground::try_condition_variable();
   // playground::try_condition_variable_with_stop();
-  playground::try_message();
+  // playground::try_message();
+  playground::try_async_stream();
+  // playground::try_coroutine();
   return 0;
 }
