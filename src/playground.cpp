@@ -380,31 +380,32 @@ struct square_sum_msg {
 
 }  // namespace
 
-void try_async_stream() {
+void try_msg_stream() {
   const auto N = 100'000'000LL;
   const size_t mod = 998244353;
   std::vector data{std::from_range, std::views::iota(1LL, N + 1LL)};
 
   using msg_t = msg::message<std::variant<std::monostate, sum_msg, square_sum_msg>>;
-  async_stream<msg_t> as;
-  counter_controller counter{.callback = [&]() { as.stop(); }};
+  msg_stream<msg_t> stream;
+  counter_controller counter{.callback = [&]() { stream.stop(); }};
 
   guarded_thread task1{std::thread{[&]() {
     counter_controller::guard guard{counter};
     for (int i = 0; i < 5; i++) {
-      as.write_sync(sum_msg{std::ranges::fold_left(data, (size_t)0, std::plus<size_t>{})});
+      stream.write_sync(sum_msg{std::ranges::fold_left(data, (size_t)0, std::plus<size_t>{})});
     }
   }}};
 
   guarded_thread task2{std::thread{[&]() {
     counter_controller::guard guard{counter};
     for (int i = 0; i < 5; i++) {
-      as.write_sync(square_sum_msg{std::ranges::fold_left(data, (size_t)0, [](size_t s, size_t v) {
-        auto res = s + (v * v % mod);
-        res = res >= mod ? res - mod : res;
-        res = res < 0 ? res + mod : res;
-        return res;
-      })});
+      stream.write_sync(
+          square_sum_msg{std::ranges::fold_left(data, (size_t)0, [](size_t s, size_t v) {
+            auto res = s + (v * v % mod);
+            res = res >= mod ? res - mod : res;
+            res = res < 0 ? res + mod : res;
+            return res;
+          })});
     }
   }}};
 
@@ -415,9 +416,9 @@ void try_async_stream() {
                      std::cout << "moded square sum = " << data.value << std::endl;
                    }};
   guarded_thread output_task{std::thread{[&]() {
-    while (as) {
+    while (stream) {
       msg_t msg;
-      if (as.read_sync(msg) == async_stream<msg_t>::status::good) {
+      if (stream.read_sync(msg) == msg_stream<msg_t>::status::good) {
         std::visit(output, msg.data);
       }
     }

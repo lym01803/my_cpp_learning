@@ -414,7 +414,7 @@ struct default_timestamp_generator {
   }
 };
 
-enum class async_stream_read_write_status : std::uint8_t { empty, good };
+enum class msg_stream_read_write_status : std::uint8_t { empty, good };
 
 template <typename T, std::invocable IDGen = default_id_generator,
           std::invocable TSGen = default_timestamp_generator>
@@ -422,7 +422,7 @@ template <typename T, std::invocable IDGen = default_id_generator,
     t.serial_number = std::declval<IDGen>()();
     t.timestamp = std::declval<TSGen>()();
   } && std::is_default_constructible_v<IDGen> && std::is_default_constructible_v<TSGen>
-class async_stream {
+class msg_stream {
   using msg_t = T;
 
   IDGen id_gen{};
@@ -432,7 +432,11 @@ class async_stream {
   std::deque<T> queue;
 
  public:
-  using status = async_stream_read_write_status;  // template params independent
+  using status = msg_stream_read_write_status;  // template params independent
+
+  msg_stream() = default;
+  msg_stream(const msg_stream&) = delete;
+  msg_stream& operator=(const msg_stream& other) = delete;
 
   template <typename U>
     requires requires(U&& data) { msg_t{std::forward<U>(data)}; }
@@ -488,7 +492,7 @@ class async_stream {
 
 void try_message();
 
-void try_async_stream();
+void try_msg_stream();
 
 void try_coroutine();
 

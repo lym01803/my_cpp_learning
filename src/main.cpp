@@ -13,7 +13,7 @@ int main() {
   // playground::try_condition_variable();
   // playground::try_condition_variable_with_stop();
   // playground::try_message();
-  playground::try_async_stream();
+  playground::try_msg_stream();
   // playground::try_coroutine();
   return 0;
 }
