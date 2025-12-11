@@ -5,6 +5,7 @@
 #include <chrono>
 #include <concepts>
 #include <condition_variable>
+#include <cstddef>
 #include <exception>
 #include <functional>
 #include <initializer_list>
@@ -13,12 +14,14 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <ostream>
 #include <queue>
 #include <random>
 #include <ranges>
 #include <ratio>
 #include <shared_mutex>
 #include <stdexcept>
+#include <stop_token>
 #include <thread>
 #include <tuple>
 #include <type_traits>
@@ -26,6 +29,7 @@
 #include <variant>
 
 #include "message.h"
+#include "toyqueue.h"
 
 namespace playground {
 
@@ -386,7 +390,7 @@ void try_msg_stream() {
   std::vector data{std::from_range, std::views::iota(1LL, N + 1LL)};
 
   using msg_t = msg::message<std::variant<std::monostate, sum_msg, square_sum_msg>>;
-  msg_stream<msg_t> stream;
+  sync_stream<msg_t> stream;
   counter_controller counter{.callback = [&]() { stream.stop(); }};
 
   guarded_thread task1{std::thread{[&]() {
@@ -418,7 +422,7 @@ void try_msg_stream() {
   guarded_thread output_task{std::thread{[&]() {
     while (stream) {
       msg_t msg;
-      if (stream.read_sync(msg) == msg_stream<msg_t>::status::good) {
+      if (stream.read_sync(msg) == sync_stream<msg_t>::status::good) {
         std::visit(output, msg.data);
       }
     }
@@ -426,5 +430,160 @@ void try_msg_stream() {
 }
 
 void try_coroutine() {}
+
+void try_toy_queue() {
+  using queue_t = toyqueue::fix_cap_queue<std::string>;
+  const size_t cap = 1000;
+  const size_t num = 1000;
+  queue_t queue{cap};
+  std::stop_source stop_signal;
+  counter_controller counter{.callback = [&]() { stop_signal.request_stop(); }};
+
+  auto product = [&](std::string tag) {
+    counter_controller::guard ctrl_gd{counter};
+    for (int i = 0; i < num; i++) {
+      while (!queue.try_push(std::format("{}: {}", tag, i)));
+    }
+  };
+
+  auto consume = [&](std::string tag, std::stop_token stop) {
+    while (!stop.stop_requested() ||
+           !queue.empty()) {  // when stop, no more push, the value of !queue.empty() can only
+                              // change from true to false between two evaluations;
+      std::optional<queue_t::value_t> data;
+      data = queue.try_pop();
+      if (data.has_value()) {
+        std::cout << std::format("{}: data: {}\n", tag, data.value());
+      }
+    }
+    std::cout << std::flush;
+  };
+
+  guarded_thread p1{std::thread{product, "p1"}};
+  guarded_thread p2{std::thread{product, "p2"}};
+  guarded_thread p3{std::thread{product, "p3"}};
+  guarded_thread p4{std::thread{product, "p4"}};
+  guarded_thread c1{std::thread{consume, "c1", stop_signal.get_token()}};
+  guarded_thread c2{std::thread{consume, "c2", stop_signal.get_token()}};
+}
+
+namespace {
+
+void try_toy_queue_serial() {
+  using queue_t = toyqueue::fix_cap_queue<size_t>;
+  const size_t cap = 40'000'000;
+  const size_t num = 40'000'000;
+  queue_t queue{cap};
+  std::stop_source stop_signal;
+  counter_controller counter{.callback = [&]() { stop_signal.request_stop(); }};
+
+  auto product = [&]() {
+    counter_controller::guard ctrl_gd{counter};
+    for (size_t i = 0; i < num; i++) {
+      while (!queue.try_push(1));
+    }
+  };
+
+  auto consume = [&]() {
+    auto stop = stop_signal.get_token();
+    size_t sum = 0;
+    while (!stop.stop_requested() || !queue.empty()) {
+      auto data = queue.try_pop();
+      if (data.has_value()) {
+        sum += data.value();
+      }
+    }
+    return sum;
+  };
+
+  auto tagged_output_wrap = [&]<typename F>(std::string tag, F f) {
+    return [tag = std::move(tag), f = std::move(f)]() mutable {
+      auto retval = f();
+      std::cout << std::format("{} return {}\n", tag, retval) << std::endl;
+    };
+  };
+
+  auto tagged_timer_wrap = [&]<typename F>(std::string tag, F f) {
+    return [tag = std::move(tag), f = std::move(f)]() mutable {
+      auto time = timer_wrap(std::move(f))();
+      std::cout << std::format("{} cost {}\n", tag,
+                               std::chrono::duration_cast<std::chrono::milliseconds>(time))
+                << std::endl;
+    };
+  };
+
+  tagged_timer_wrap("[serial total time]", [&]() {
+    tagged_timer_wrap("[producer]", product)();
+    tagged_timer_wrap("[consumer]", tagged_output_wrap("[consumer]", consume))();
+  })();
+}
+
+void try_toy_concurrency() {
+  using queue_t = toyqueue::fix_cap_queue<size_t>;
+  const size_t cap = 10'000'000;
+  const size_t num = 10'000'000;
+  queue_t queue{cap};
+  std::stop_source stop_signal;
+  counter_controller counter{.callback = [&]() { stop_signal.request_stop(); }};
+
+  auto product = [&]() {
+    counter_controller::guard ctrl_gd{counter};
+    for (size_t i = 0; i < num; i++) {
+      while (!queue.try_push(1)) {
+        std::this_thread::yield();
+      }
+    }
+  };
+
+  auto consume = [&]() {
+    auto stop = stop_signal.get_token();
+    size_t sum = 0;
+    while (!stop.stop_requested() || !queue.empty()) {
+      auto data = queue.try_pop();
+      if (data.has_value()) {
+        sum += data.value();
+      } else {
+        std::this_thread::yield();
+      }
+    }
+    return sum;
+  };
+
+  auto tagged_output_wrap = [&]<typename F>(std::string tag, F f) {
+    return [tag = std::move(tag), f = std::move(f)]() mutable {
+      auto retval = f();
+      std::cout << std::format("{} return {}\n", tag, retval) << std::endl;
+    };
+  };
+
+  auto tagged_timer_wrap = [&]<typename F>(std::string tag, F f) {
+    return [tag = std::move(tag), f = std::move(f)]() mutable {
+      auto time = timer_wrap(std::move(f))();
+      std::cout << std::format("{} cost {}\n", tag,
+                               std::chrono::duration_cast<std::chrono::milliseconds>(time))
+                << std::endl;
+    };
+  };
+
+  tagged_timer_wrap("[SPSC concurrent with insufficient queue cap]", [&]() {
+    guarded_thread p1{std::thread{tagged_timer_wrap("[p1]", product)}};
+    guarded_thread p2{std::thread{tagged_timer_wrap("[p2]", product)}};
+    guarded_thread p3{std::thread{tagged_timer_wrap("[p3]", product)}};
+    guarded_thread p4{std::thread{tagged_timer_wrap("[p4]", product)}};
+    guarded_thread c1{std::thread{tagged_timer_wrap("[c1]", tagged_output_wrap("[c1]", consume))}};
+    guarded_thread c2{std::thread{tagged_timer_wrap("[c2]", tagged_output_wrap("[c2]", consume))}};
+  })();
+}
+
+}  // namespace
+
+void try_toy_queue2() {
+  for (int i = 0; i < 3; i++) {
+    try_toy_queue_serial();
+  }
+  for (int i = 0; i < 3; i++) {
+    try_toy_concurrency();
+  }
+}
 
 }  // namespace playground

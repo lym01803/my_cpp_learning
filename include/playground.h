@@ -25,7 +25,7 @@
 #include <utility>
 #include <vector>
 
-#include "message.h"
+#include "toyqueue.h"
 
 namespace playground {
 
@@ -414,7 +414,13 @@ struct default_timestamp_generator {
   }
 };
 
-enum class msg_stream_read_write_status : std::uint8_t { empty, good };
+enum class sync_stream_read_write_status : std::uint8_t { empty, good };
+
+template <typename stream>
+class read_dispatcher;
+
+template <typename stream>
+class write_dispatcher;
 
 template <typename T, std::invocable IDGen = default_id_generator,
           std::invocable TSGen = default_timestamp_generator>
@@ -422,9 +428,7 @@ template <typename T, std::invocable IDGen = default_id_generator,
     t.serial_number = std::declval<IDGen>()();
     t.timestamp = std::declval<TSGen>()();
   } && std::is_default_constructible_v<IDGen> && std::is_default_constructible_v<TSGen>
-class msg_stream {
-  using msg_t = T;
-
+class sync_stream {
   IDGen id_gen{};
   TSGen ts_gen{};
   std::mutex mutex;
@@ -432,11 +436,8 @@ class msg_stream {
   std::deque<T> queue;
 
  public:
-  using status = msg_stream_read_write_status;  // template params independent
-
-  msg_stream() = default;
-  msg_stream(const msg_stream&) = delete;
-  msg_stream& operator=(const msg_stream& other) = delete;
+  using msg_t = T;
+  using status = sync_stream_read_write_status;  // template params independent
 
   template <typename U>
     requires requires(U&& data) { msg_t{std::forward<U>(data)}; }
@@ -490,10 +491,62 @@ class msg_stream {
   }
 };
 
+// template <typename stream>
+// class write_dispatcher {
+//  public:
+//   using stream_t = stream;
+//   using msg_t = stream::msg_t;
+//   using status_t = stream::status;
+
+//   write_dispatcher(stream_t& s, size_t buffer_cap)
+//       : queue{buffer_cap}, s{s}, th{std::thread{[this]() { this->work(); }}} {}
+
+//   ~write_dispatcher() {
+//     // tell th to stop running, events happen in the order:
+//     // cv.stop() => th->join() => th deconstructed => cv deconstructed, so it is safe
+//     cv.stop();
+//   }
+
+//   template <typename U>
+//     requires requires(U&& data) { msg_t{std::forward<U>(data)}; }
+//   void dispatch(U&& data) {
+//     {
+//       std::lock_guard lock{mutex};
+//       queue.push(msg_t{std::forward<U>(data)});
+//     }
+//     cv->notify_one();
+//   }
+
+//  private:
+//   toyqueue::circular_queue<msg_t> queue;
+//   std::mutex mutex;
+//   stopable_cv cv;
+//   stream_t& s;
+//   guarded_thread th;  // construct after cv, deconstruct before cv
+
+//   void work() {
+//     while (!cv.is_stoped()) {
+//       {
+//         std::unique_lock lock{mutex};
+//         cv->wait(lock, [this]() { return !queue.empty() || cv.is_stoped(); });
+//       }
+//       if (!queue.empty()) {
+//         // concurrency write will not cause queue become empty
+//         s.write_sync(std::move(queue.front()));
+//         queue.pop();
+//       }
+//     }
+//   }
+// };
+
 void try_message();
 
 void try_msg_stream();
 
 void try_coroutine();
+
+void try_toy_queue();
+
+void try_toy_queue2();
 
 }  // namespace playground

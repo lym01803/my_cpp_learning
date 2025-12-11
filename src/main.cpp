@@ -13,7 +13,9 @@ int main() {
   // playground::try_condition_variable();
   // playground::try_condition_variable_with_stop();
   // playground::try_message();
-  playground::try_msg_stream();
+  // playground::try_msg_stream();
   // playground::try_coroutine();
+  // playground::try_toy_queue();
+  playground::try_toy_queue2();
   return 0;
 }
