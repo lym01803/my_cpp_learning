@@ -1,10 +1,12 @@
 #pragma once
 
-#include <stdatomic.h>
+#include <spdlog/spdlog.h>
 
-#include <array>
 #include <atomic>
+#include <chrono>
+#include <compare>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
@@ -15,15 +17,17 @@
 
 namespace toyqueue {
 
-enum class queue_location_status : uint8_t { empty, busy, not_empty };
+enum class q_loc_status : uint8_t { empty, busy, not_empty };
 
 template <std::movable T>
 class fix_cap_queue {
  public:
   using value_t = T;
-  using status = queue_location_status;
+  using status = q_loc_status;
 
  private:
+  using index_t = size_t;
+
   struct location {
     std::optional<value_t> data;
     std::atomic<status> flag{status::empty};
@@ -31,8 +35,8 @@ class fix_cap_queue {
   using container_t = std::vector<location>;
 
   container_t array;
-  std::atomic<size_t> head{0};
-  std::atomic<size_t> tail{0};
+  std::atomic<index_t> head;
+  std::atomic<index_t> tail;
   const size_t cap;
 
   struct flag_guard {
@@ -54,7 +58,7 @@ class fix_cap_queue {
   };
 
  public:
-  fix_cap_queue(size_t cap) : array(cap + 1), cap{cap} {}
+  fix_cap_queue(size_t log_cap) : array(to_cap(log_cap)), cap{to_cap(log_cap)} {}
 
   /** @warning validity not guaranteed under concurrency;
                应在有锁的情形下使用, 或在生产者已停止时用作判定结束的谓词;
@@ -62,7 +66,11 @@ class fix_cap_queue {
                返回 false 则队列仍可能因为并发的 pop 变为空;
    */
   bool empty() const noexcept {
-    return head.load(std::memory_order_relaxed) == tail.load(std::memory_order_relaxed);
+    return empty_(head.load(std::memory_order_relaxed), tail.load(std::memory_order_relaxed));
+  }
+
+  bool full() const noexcept {
+    return full_(head.load(std::memory_order_relaxed), tail.load(std::memory_order_relaxed));
   }
 
   /**
@@ -74,29 +82,24 @@ class fix_cap_queue {
          应尽可能保证 T 类型 移动构造/赋值 nothrow, 接收返回值时发生异常会丢失该数据, 但队列仍有效;
    */
   std::optional<value_t> try_pop() noexcept(std::is_nothrow_move_constructible_v<T>) {
-    size_t cur_head = head.load(std::memory_order_relaxed);
+    index_t cur_head = head.load(std::memory_order_relaxed);
     bool not_empty{};
-    // 如果 CAS 成功, 则判定 not_empty 时的 cur_head 一定是即时的值, 而 tail 不会回退,
-    // 故 not_empty 在 CAS 成功时有效 (from the view of this thread)
-    while ((not_empty = cur_head != tail.load(std::memory_order_relaxed)) &&
+    while ((not_empty = !empty_(cur_head, tail.load(std::memory_order_relaxed))) &&
            !head.compare_exchange_weak(cur_head, next_index(cur_head), std::memory_order_relaxed)) {
       std::this_thread::yield();
     }
     if (!not_empty) {
       return std::nullopt;
     }
-    location& loc = array[cur_head];
-    // not_mpty -> busy -> empty
+    location& loc = array[loc_index(cur_head)];
     status expected = status::not_empty;
     while (!loc.flag.compare_exchange_weak(expected, status::busy, std::memory_order_acquire,
                                            std::memory_order_relaxed)) {
       expected = status::not_empty;
       std::this_thread::yield();
     }
-    // return move(loc.data) -> set loc.data to nullopt -> set flag to empty (release)
     flag_guard fg{.flag = loc.flag, .set_to = status::empty};
     clear_data_guard dg{loc.data};
-    // 显式移交 loc.data
     return std::move(loc.data);
   }
 
@@ -109,40 +112,53 @@ class fix_cap_queue {
          应尽可能保证 T 类型 移动构造/赋值 nothrow, push 构造时发生异常会丢失数据, 但队列仍有效;
    */
   bool try_push(T value) noexcept(std::is_nothrow_move_constructible_v<T>) {
-    size_t cur_tail = tail.load(std::memory_order_relaxed);
-    size_t next_tail = next_index(cur_tail);
+    index_t cur_tail = tail.load(std::memory_order_relaxed);
     bool not_full{};
-    // 如果 CAS 成功, 则判定 not_full 时的 cur_tail 一定是即时的值, 而 head 不会回退,
-    // 故 not_full 在 CAS 成功时有效 (from the view of this thread)
-    while ((not_full = next_tail != head.load(std::memory_order_relaxed)) &&
-           !tail.compare_exchange_weak(cur_tail, next_tail, std::memory_order_relaxed)) {
-      next_tail = next_index(cur_tail);
+    while ((not_full = !full_(head.load(std::memory_order_relaxed), cur_tail)) &&
+           !tail.compare_exchange_weak(cur_tail, next_index(cur_tail), std::memory_order_relaxed)) {
       std::this_thread::yield();
     }
     if (!not_full) {
       return false;
     }
-    location& loc = array[cur_tail];
-    // empty -> busy -> not_empty
+    location& loc = array[loc_index(cur_tail)];
     status expected = status::empty;
     while (!loc.flag.compare_exchange_weak(expected, status::busy, std::memory_order_acquire,
                                            std::memory_order_relaxed)) {
       expected = status::empty;
       std::this_thread::yield();
     }
-    // loc.data = std::move(value) -> set flag to not_empty (release)
     flag_guard fg{.flag = loc.flag, .set_to = status::not_empty};
-    // when exception, set data to nullopt
     clear_data_guard dg{loc.data};
     loc.data = std::move(value);
-    // not set data to nullopt
     dg.disable = true;
     return true;
   }
 
  private:
-  size_t next_index(size_t index) const noexcept {
-    return index == cap ? 0 : index + 1;
+  index_t next_index(index_t idx) const noexcept {
+    return idx + (index_t)1;
+  }
+
+  size_t loc_index(index_t index) const noexcept {
+    return index & (cap - (size_t)1);
+  }
+
+  bool empty_(index_t head, index_t tail) const noexcept {
+    return head == tail;
+  }
+
+  bool full_(index_t head, index_t tail) const noexcept {
+    return head + cap == tail;
+  }
+
+  static size_t to_cap(size_t log_cap) {
+    static constexpr size_t max_log_cap = 40;
+    if (log_cap > max_log_cap) {
+      spdlog::warn(std::format("log_cap received {}, restricted to {}", log_cap, max_log_cap));
+      log_cap = max_log_cap;
+    }
+    return (size_t)1 << log_cap;
   }
 };
 

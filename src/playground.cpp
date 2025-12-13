@@ -433,9 +433,9 @@ void try_coroutine() {}
 
 void try_toy_queue() {
   using queue_t = toyqueue::fix_cap_queue<std::string>;
-  const size_t cap = 1000;
+  const size_t log_cap = 10;
   const size_t num = 1000;
-  queue_t queue{cap};
+  queue_t queue{log_cap};
   std::stop_source stop_signal;
   counter_controller counter{.callback = [&]() { stop_signal.request_stop(); }};
 
@@ -472,9 +472,9 @@ namespace {
 struct toy_queue_test {
   using queue_t = toyqueue::fix_cap_queue<size_t>;
 
-  const size_t cap{1'000'000};
+  const size_t log_cap{20};
   const size_t num{1'000'000};
-  queue_t queue{cap};
+  queue_t queue{log_cap};
   std::vector<size_t> temp_retvals;
   std::mutex mutex_for_temp_retvals;
 
@@ -573,7 +573,8 @@ struct toy_queue_test {
 
   void naive_sum() {
     tagged_timer_wrap("[naive sum]", [&]() {
-      std::vector<size_t> arr{num};
+      std::vector<size_t> arr;
+      arr.reserve(num);
       for (int i = 0; i < num; i++) {
         arr.emplace_back(1);
       }
@@ -587,62 +588,74 @@ struct toy_queue_test {
 }  // namespace
 
 void try_toy_queue2() {
-  // const size_t times = 5;
-  // const size_t N = 1'000'000;
-  // // naive_sum
-  // std::cout << "==============================================" << "naive_sum"
-  //           << "==============================================" << std::endl;
-  // {
-  //   toy_queue_test test{.num = 4 * N};
-  //   for (size_t i = 0; i < times; i++) {
-  //     test.naive_sum();
-  //   }
-  // }
-  // // serial
-  // std::cout << "==============================================" << "serial"
-  //           << "==============================================" << std::endl;
-  // {
-  //   toy_queue_test test{.cap = 4 * N, .num = 4 * N};
-  //   for (size_t i = 0; i < times; i++) {
-  //     test.test_serial();
-  //   }
-  // }
-  // // concurrency, spsc
-  // std::cout << "==============================================" << "spsc"
-  //           << "==============================================" << std::endl;
-  // {
-  //   toy_queue_test test{.cap = 4 * N, .num = 4 * N};
-  //   for (size_t i = 0; i < times; i++) {
-  //     test.test_concurrent(1, 1);
-  //   }
-  // }
-  // // concurrency, mpmc absolutely suffient cap
-  // std::cout << "=============================================="
-  //           << "mpmc (4p2c) with absolutely suffient cap"
-  //           << "==============================================" << std::endl;
-  // {
-  //   toy_queue_test test{.cap = 4 * N, .num = N};
-  //   for (size_t i = 0; i < times; i++) {
-  //     test.test_concurrent(4, 2);
-  //   }
-  // }
-  // // concurrency, mpmc insuffient cap
-  // std::cout << "==============================================" << "mpmc (4p2c) with insuffient cap"
-  //           << "==============================================" << std::endl;
-  // {
-  //   toy_queue_test test{.cap = (4 + 2) * 100, .num = N};
-  //   for (size_t i = 0; i < times; i++) {
-  //     test.test_concurrent(4, 2);
-  //   }
-  // }
-  // concurrency, mpmc extremely insuffient cap
-  std::cout << "=============================================="
-            << "mpmc (4p2c) with extremely insuffient cap"
+  const size_t times = 10;
+  const size_t N = 1'000'000;
+  const size_t log_cap = 20;
+  // naive_sum
+  std::cout << "==============================================" << "naive_sum"
             << "==============================================" << std::endl;
   {
-    toy_queue_test test{.cap = 1, .num = 1000};
-    for (size_t i = 0; i < 10; i++) {
-      test.test_concurrent(4, 4);
+    toy_queue_test test{.num = 4 * N};
+    for (size_t i = 0; i < times; i++) {
+      test.naive_sum();
+    }
+  }
+  // serial
+  std::cout << "==============================================" << "serial"
+            << "==============================================" << std::endl;
+  {
+    toy_queue_test test{.log_cap = 2 + log_cap, .num = 4 * N};
+    for (size_t i = 0; i < times; i++) {
+      test.test_serial();
+    }
+  }
+  // concurrency, spsc
+  std::cout << "==============================================" << "spsc"
+            << "==============================================" << std::endl;
+  {
+    toy_queue_test test{.log_cap = 2 + log_cap, .num = 4 * N};
+    for (size_t i = 0; i < times; i++) {
+      test.test_concurrent(1, 1);
+    }
+  }
+  // concurrency, mpmc absolutely sufficient cap
+  std::cout << "=============================================="
+            << "mpmc (4p2c) with absolutely sufficient cap"
+            << "==============================================" << std::endl;
+  {
+    toy_queue_test test{.log_cap = 2 + log_cap, .num = N};
+    for (size_t i = 0; i < times; i++) {
+      test.test_concurrent(4, 2);
+    }
+  }
+  // concurrency, mpmc with relatively sufficient cap
+  std::cout << "=============================================="
+            << "mpmc (4p2c) with relatively sufficient cap"
+            << "==============================================" << std::endl;
+  {
+    toy_queue_test test{.log_cap = 16, .num = N};
+    for (size_t i = 0; i < times; i++) {
+      test.test_concurrent(4, 2);
+    }
+  }
+  // concurrency, mpmc insufficient cap
+  std::cout << "=============================================="
+            << "mpmc (4p2c) with insufficient cap"
+            << "==============================================" << std::endl;
+  {
+    toy_queue_test test{.log_cap = 4, .num = N};
+    for (size_t i = 0; i < times; i++) {
+      test.test_concurrent(4, 2);
+    }
+  }
+  // concurrency, mpmc extremely insufficient cap
+  std::cout << "=============================================="
+            << "mpmc (4p2c) with extremely insufficient cap"
+            << "==============================================" << std::endl;
+  {
+    toy_queue_test test{.log_cap = 0, .num = N};
+    for (size_t i = 0; i < times; i++) {
+      test.test_concurrent(4, 2);
     }
   }
 }
