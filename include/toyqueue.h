@@ -162,4 +162,54 @@ class fix_cap_queue {
   }
 };
 
+template <std::movable T>
+class naive_fix_cap_queue {
+ public:
+  using value_t = T;
+  using container_t = std::vector<std::optional<T>>;
+
+  container_t array;
+  size_t head{0};
+  size_t tail{0};
+  const size_t cap;
+
+  naive_fix_cap_queue(size_t cap) : array(cap + 1), cap{cap} {};
+
+  bool empty() const noexcept {
+    return head == tail;
+  }
+
+  bool full() const noexcept {
+    return head == next_index(tail);
+  }
+
+  void push(T value) noexcept(std::is_nothrow_move_constructible_v<T>) {
+    array[tail] = std::move(value);
+    tail = next_index(tail);
+    if (tail == head) {
+      head = next_index(head);
+    }
+  }
+
+  T const& front() const noexcept {
+    return array[head];
+  }
+
+  T& front() noexcept {
+    return array[head];
+  }
+
+  std::optional<T> pop() noexcept {
+    std::optional<T> t = std::move(array[head]);
+    array[head] = std::nullopt;
+    head = next_index(head);
+    return t;
+  }
+
+ private:
+  size_t next_index(size_t index) const noexcept {
+    return index == cap ? 0 : index + 1;
+  }
+};
+
 };  // namespace toyqueue

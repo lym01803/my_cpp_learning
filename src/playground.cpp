@@ -563,6 +563,38 @@ struct toy_queue_test {
               << std::endl;
   }
 
+  /** @warning do not run test_concurrent concurrently */
+  void test_concurrent_with_initial_data(size_t num_producer = 1, size_t num_consumer = 1,
+                                         size_t initial_data_num = -1) {
+    if (initial_data_num == -1) {
+      initial_data_num = num * num_producer / 2;
+    }
+    for (size_t i = 0; i < initial_data_num; i++) {
+      queue.try_push(1);
+    }
+
+    temp_retvals.clear();
+    std::stop_source stop;
+    auto counter = std::make_shared<counter_controller>((size_t)0, [&]() { stop.request_stop(); });
+
+    tagged_timer_wrap("[concurrent total]", [&]() {
+      std::vector<guarded_thread> threads;
+      for (size_t i = 0; i < num_producer; i++) {
+        auto tag = std::format("[producer {}]", i);
+        threads.emplace_back(std::thread{tagged_timer_wrap(tag, [&]() { product(counter); })});
+      }
+      for (size_t i = 0; i < num_consumer; i++) {
+        auto tag = std::format("[consumer {}]", i);
+        threads.emplace_back(std::thread{tagged_timer_wrap(
+            tag, tagged_output_wrap(tag, [&]() { return consume(stop.get_token()); }))});
+      }
+    })();
+
+    std::cout << std::format("[total count] {}",
+                             std::ranges::fold_left(temp_retvals, (size_t)0, std::plus<size_t>{}))
+              << std::endl;
+  }
+
   void test_serial() {
     tagged_timer_wrap("[serial total]", [&]() {
       tagged_timer_wrap("[producer]", [this]() { product_serial(); })();
@@ -581,6 +613,117 @@ struct toy_queue_test {
       std::cout << std::format("[naive sum] count {}",
                                std::ranges::fold_left(arr, (size_t)0, std::plus<size_t>{}))
                 << std::endl;
+    })();
+  }
+};
+
+struct mutex_queue_test {
+  using queue_t = toyqueue::naive_fix_cap_queue<size_t>;
+
+  const size_t cap{0x100000};
+  const size_t num{1'000'000};
+  queue_t queue{cap};
+
+  void product(std::shared_ptr<counter_controller> counter, std::mutex& mutex, stopable_cv& cv) {
+    counter_controller::guard counter_gd{*counter};
+    for (size_t i = 0; i < num; i++) {
+      std::unique_lock lock{mutex};
+      while (queue.full()) {
+        lock.unlock();
+        std::this_thread::yield();
+        lock.lock();
+      }
+      queue.push(1);
+      lock.unlock();
+      cv->notify_one();
+    }
+  }
+
+  size_t consume(std::mutex& mutex, stopable_cv& cv) {
+    size_t sum = 0;
+    while (true) {
+      std::unique_lock lock{mutex};
+      cv->wait(lock, [&]() { return !queue.empty() || cv.is_stoped(); });
+      if (!queue.empty()) {
+        auto data = queue.pop();
+        lock.unlock();
+        if (data.has_value()) {
+          sum += data.value();
+        }
+      } else {
+        break;
+      }
+    }
+    return sum;
+  }
+
+  template <typename F>
+  auto tagged_output_wrap(std::string tag, F f) {
+    return [tag = std::move(tag), f = std::move(f), this]() mutable {
+      size_t retval = f();
+      std::cout << std::format("{} return value {}\n", tag, retval) << std::endl;
+    };
+  }
+
+  template <typename F>
+  auto tagged_timer_wrap(std::string tag, F f) {
+    return [tag = std::move(tag), f = timer_wrap(std::move(f))]() mutable {
+      auto time = f();
+      std::cout << std::format("{} cost time {}\n", tag,
+                               std::chrono::duration_cast<std::chrono::milliseconds>(time))
+                << std::endl;
+    };
+  }
+
+  /** @warning do not run test_concurrent concurrently */
+  void test_concurrent(size_t num_producer = 1, size_t num_consumer = 1) {
+    std::mutex mutex;
+    stopable_cv cv;
+    auto counter = std::make_shared<counter_controller>((size_t)0, [&]() { cv.stop(); });
+
+    tagged_timer_wrap("[concurrent total]", [&]() {
+      std::vector<guarded_thread> threads;
+      for (size_t i = 0; i < num_producer; i++) {
+        auto tag = std::format("[producer {}]", i);
+        threads.emplace_back(
+            std::thread{tagged_timer_wrap(tag, [&]() { product(counter, mutex, cv); })});
+      }
+      for (size_t i = 0; i < num_consumer; i++) {
+        auto tag = std::format("[consumer {}]", i);
+        threads.emplace_back(std::thread{
+            tagged_timer_wrap(tag, tagged_output_wrap(tag, [&]() { return consume(mutex, cv); }))});
+      }
+    })();
+  }
+
+  /** @warning do not run test_concurrent concurrently */
+  void test_concurrent_with_initial_data(size_t num_producer = 1, size_t num_consumer = 1,
+                                         size_t initial_data_num = -1) {
+    if (initial_data_num == -1) {
+      initial_data_num = num * num_producer / 2;
+    }
+    for (size_t i = 0; i < initial_data_num; i++) {
+      if (!queue.full()) {
+        queue.push(1);
+      }
+    }
+
+    std::mutex mutex;
+    stopable_cv cv;
+    auto counter = std::make_shared<counter_controller>((size_t)0, [&]() { cv.stop(); });
+
+    tagged_timer_wrap("[concurrent total]", [&]() {
+      std::vector<guarded_thread> threads;
+      for (size_t i = 0; i < num_producer; i++) {
+        auto tag = std::format("[producer {}]", i);
+        threads.emplace_back(
+            std::thread{tagged_timer_wrap(tag, [&]() { product(counter, mutex, cv); })});
+      }
+      for (size_t i = 0; i < num_consumer; i++) {
+        auto tag = std::format("[consumer {}]", i);
+        threads.emplace_back(std::thread{
+            tagged_timer_wrap(tag, tagged_output_wrap(tag, [&]() { return consume(mutex, cv); }))});
+      }
     })();
   }
 };
@@ -618,6 +761,16 @@ void try_toy_queue2() {
       test.test_concurrent(1, 1);
     }
   }
+  // concurrency, naive queue + mutex / cv, spsc
+  std::cout << "=============================================="
+            << "naive queue + mutex / cv, spsc"
+            << "==============================================" << std::endl;
+  {
+    mutex_queue_test test{.cap = 4 * N + 1, .num = 4 * N};
+    for (size_t i = 0; i < times; i++) {
+      test.test_concurrent(1, 1);
+    }
+  }
   // concurrency, mpmc absolutely sufficient cap
   std::cout << "=============================================="
             << "mpmc (4p2c) with absolutely sufficient cap"
@@ -626,6 +779,36 @@ void try_toy_queue2() {
     toy_queue_test test{.log_cap = 2 + log_cap, .num = N};
     for (size_t i = 0; i < times; i++) {
       test.test_concurrent(4, 2);
+    }
+  }
+  // concurrency, naive queue + mutex / cv, mpmc
+  std::cout << "=============================================="
+            << "naive queue + mutex / cv, mpmc (4p2c)"
+            << "==============================================" << std::endl;
+  {
+    mutex_queue_test test{.cap = 4 * N + 1, .num = N};
+    for (size_t i = 0; i < times; i++) {
+      test.test_concurrent(4, 2);
+    }
+  }
+  // concurrency, mpmc absolutely sufficient cap + half initial data
+  std::cout << "=============================================="
+            << "mpmc (4p2c) with absolutely sufficient cap + 1/4 initial data"
+            << "==============================================" << std::endl;
+  {
+    toy_queue_test test{.log_cap = 2 + log_cap, .num = N};
+    for (size_t i = 0; i < times; i++) {
+      test.test_concurrent_with_initial_data(4, 2, N);
+    }
+  }
+  // concurrency, naive queue + mutex / cv, mpmc + half initial data
+  std::cout << "=============================================="
+            << "naive queue + mutex / cv, mpmc (4p2c) + 1/4 initial data"
+            << "==============================================" << std::endl;
+  {
+    mutex_queue_test test{.cap = 4 * N + 1, .num = N};
+    for (size_t i = 0; i < times; i++) {
+      test.test_concurrent_with_initial_data(4, 2, N);
     }
   }
   // concurrency, mpmc with relatively sufficient cap
