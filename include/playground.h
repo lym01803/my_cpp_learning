@@ -549,4 +549,36 @@ void try_toy_queue();
 
 void try_toy_queue2();
 
+namespace toy_func_type {
+
+template <std::movable F>
+class task {
+  F f;
+
+ public:
+  task(F f) : f(std::move(f)) {}
+
+  template <typename... Args>
+    requires std::invocable<F, Args...>
+  auto run(Args&&... args) {
+    return std::invoke(f, std::forward<Args>(args)...);
+  }
+};
+
+template <typename... Args>
+void f(Args&&... args) {
+  ((std::cout << args << " "), ...);
+  std::cout << std::endl;
+}
+
+inline void toy_task_test() {
+  auto task_to_run = [&]<typename... Args>(Args&&... args) {
+    task t{f<Args...>};
+    return t.run(std::forward<Args>(args)...);
+  };
+  task_to_run(1, 2);
+}
+
+}  // namespace toy_func_type
+
 }  // namespace playground
