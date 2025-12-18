@@ -843,4 +843,61 @@ void try_toy_queue2() {
   }
 }
 
+namespace {
+
+template <typename F, typename... Caps>
+struct toy_lambda {
+  template <typename T>
+  struct index_helper;
+
+  template <size_t... Is>
+  struct index_helper<std::index_sequence<Is...>> {
+    template <typename... Args>
+    static auto call(F& f, std::tuple<Caps...>& captures, Args&&... args) {
+      return std::invoke(f, std::get<Is>(captures)..., std::forward<Args>(args)...);
+    }
+  };
+
+  using index_t = decltype(std::make_index_sequence<sizeof...(Caps)>());
+
+  F f;
+  std::tuple<Caps...> captures;
+  toy_lambda(F f, Caps... caps) : f(std::forward<F>(f)), captures{std::forward<Caps>(caps)...} {}
+
+  template <typename... Args>
+    requires std::invocable<F, Caps..., Args...>
+  auto operator()(Args&&... args) {
+    return index_helper<index_t>::call(f, captures, std::forward<Args>(args)...);
+  }
+};
+
+template <typename F, typename... Caps>
+toy_lambda(F, Caps...) -> toy_lambda<F, Caps...>;
+
+// int add(int x, int y) {
+//   return x + y;
+// }
+
+}  // namespace
+
+void try_toy_duck_type() {
+  int x = 10;
+  int y = 20;
+
+  struct add {
+    auto operator()(int x, int y) const {
+      return x + y;
+    }
+  };
+
+  auto f = toy_lambda(add{});  // 不捕获
+  std::cout << f(x, y) << std::endl;
+  auto g = toy_lambda(add{}, x, y);  // 值捕获
+  std::cout << g() << std::endl;
+  auto h = toy_lambda(add{}, std::ref(x), std::ref(y));  // "引用"捕获
+  std::cout << h() << std::endl;
+  auto k = toy_lambda<add, int&, int&>(add{}, x, y);  // 真-引用捕获
+  std::cout << k() << std::endl;
+}
+
 }  // namespace playground

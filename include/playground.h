@@ -491,53 +491,53 @@ class sync_stream {
   }
 };
 
-// template <typename stream>
-// class write_dispatcher {
-//  public:
-//   using stream_t = stream;
-//   using msg_t = stream::msg_t;
-//   using status_t = stream::status;
+template <typename stream>
+class write_dispatcher {
+ public:
+  using stream_t = stream;
+  using msg_t = stream::msg_t;
+  using status_t = stream::status;
 
-//   write_dispatcher(stream_t& s, size_t buffer_cap)
-//       : queue{buffer_cap}, s{s}, th{std::thread{[this]() { this->work(); }}} {}
+  write_dispatcher(stream_t& s, size_t buffer_cap)
+      : queue{buffer_cap}, s{s}, th{std::thread{[this]() { this->work(); }}} {}
 
-//   ~write_dispatcher() {
-//     // tell th to stop running, events happen in the order:
-//     // cv.stop() => th->join() => th deconstructed => cv deconstructed, so it is safe
-//     cv.stop();
-//   }
+  ~write_dispatcher() {
+    // tell th to stop running, events happen in the order:
+    // cv.stop() => th->join() => th deconstructed => cv deconstructed, so it is safe
+    cv.stop();
+  }
 
-//   template <typename U>
-//     requires requires(U&& data) { msg_t{std::forward<U>(data)}; }
-//   void dispatch(U&& data) {
-//     {
-//       std::lock_guard lock{mutex};
-//       queue.push(msg_t{std::forward<U>(data)});
-//     }
-//     cv->notify_one();
-//   }
+  template <typename U>
+    requires requires(U&& data) { msg_t{std::forward<U>(data)}; }
+  void dispatch(U&& data) {
+    {
+      std::lock_guard lock{mutex};
+      queue.push(msg_t{std::forward<U>(data)});
+    }
+    cv->notify_one();
+  }
 
-//  private:
-//   toyqueue::circular_queue<msg_t> queue;
-//   std::mutex mutex;
-//   stopable_cv cv;
-//   stream_t& s;
-//   guarded_thread th;  // construct after cv, deconstruct before cv
+ private:
+  toyqueue::fix_cap_queue<msg_t> queue{20};
+  std::mutex mutex;
+  stopable_cv cv;
+  stream_t& s;
+  guarded_thread th;  // construct after cv, deconstruct before cv
 
-//   void work() {
-//     while (!cv.is_stoped()) {
-//       {
-//         std::unique_lock lock{mutex};
-//         cv->wait(lock, [this]() { return !queue.empty() || cv.is_stoped(); });
-//       }
-//       if (!queue.empty()) {
-//         // concurrency write will not cause queue become empty
-//         s.write_sync(std::move(queue.front()));
-//         queue.pop();
-//       }
-//     }
-//   }
-// };
+  void work() {
+    while (!cv.is_stoped()) {
+      {
+        std::unique_lock lock{mutex};
+        cv->wait(lock, [this]() { return !queue.empty() || cv.is_stoped(); });
+      }
+      if (!queue.empty()) {
+        // concurrency write will not cause queue become empty
+        s.write_sync(std::move(queue.front()));
+        queue.pop();
+      }
+    }
+  }
+};
 
 void try_message();
 
@@ -580,5 +580,8 @@ inline void toy_task_test() {
 }
 
 }  // namespace toy_func_type
+void try_toy_queue3();
+
+void try_toy_duck_type();
 
 }  // namespace playground
