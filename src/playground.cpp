@@ -893,6 +893,8 @@ void try_toy_duck_type() {
   auto f = toy_lambda(add{});  // 不捕获
   std::cout << f(x, y) << std::endl;
   auto g = toy_lambda(add{}, x, y);  // 值捕获
+  auto g2 = toy_lambda(add{}, x, y);
+  static_assert(std::is_same_v<decltype(g), decltype(g2)>, "not same type");
   std::cout << g() << std::endl;
   auto h = toy_lambda(add{}, std::ref(x), std::ref(y));  // "引用"捕获
   std::cout << h() << std::endl;
