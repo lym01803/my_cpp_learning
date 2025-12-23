@@ -584,4 +584,6 @@ void try_toy_queue3();
 
 void try_toy_duck_type();
 
+void try_toy_duck_type_zero();
+
 }  // namespace playground

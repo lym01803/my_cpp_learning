@@ -902,4 +902,61 @@ void try_toy_duck_type() {
   std::cout << k() << std::endl;
 }
 
+namespace {
+
+template <typename F, typename... Caps>
+  requires std::is_trivially_copyable_v<F> && std::is_trivially_constructible_v<F>
+struct toy_lambda_zero {
+  template <typename T>
+  struct index_helper;
+
+  template <size_t... Is>
+  struct index_helper<std::index_sequence<Is...>> {
+    template <typename... Args>
+    static auto call(std::tuple<Caps...>& captures, Args&&... args) {
+      return std::invoke(F{}, std::get<Is>(captures)..., std::forward<Args>(args)...);
+    }
+  };
+
+  using index_t = decltype(std::make_index_sequence<sizeof...(Caps)>());
+
+  std::tuple<Caps...> captures;
+
+  toy_lambda_zero(Caps... caps) : captures{std::forward<Caps>(caps)...} {}
+  toy_lambda_zero(F f, Caps... caps) : captures{std::forward<Caps>(caps)...} {}
+
+  template <typename... Args>
+    requires std::invocable<F, Caps..., Args...>
+  auto operator()(Args&&... args) {
+    return index_helper<index_t>::call(captures, std::forward<Args>(args)...);
+  }
+};
+
+template <typename F, typename... Caps>
+toy_lambda_zero(F, Caps...) -> toy_lambda_zero<F, Caps...>;
+
+}  // namespace
+
+void try_toy_duck_type_zero() {
+  int x = 10;
+  int y = 20;
+
+  struct add {
+    auto operator()(int x, int y) const {
+      return x + y;
+    }
+  };
+
+  auto f = toy_lambda_zero(add{});  // 不捕获
+  std::cout << f(x, y) << std::endl;
+  auto g = toy_lambda_zero(add{}, x, y);  // 值捕获
+  auto g2 = toy_lambda_zero(add{}, x, y);
+  static_assert(std::is_same_v<decltype(g), decltype(g2)>, "not same type");
+  std::cout << g() << std::endl;
+  auto h = toy_lambda_zero(add{}, std::ref(x), std::ref(y));  // "引用"捕获
+  std::cout << h() << std::endl;
+  auto k = toy_lambda_zero<add, int&, int&>(add{}, x, y);  // 真-引用捕获
+  std::cout << k() << std::endl;
+}
+
 }  // namespace playground
