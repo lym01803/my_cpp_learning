@@ -18,6 +18,8 @@ int main() {
   // playground::try_toy_queue();
   // playground::try_toy_queue2();
   // playground::toy_func_type::toy_task_test();
-  playground::try_toy_duck_type();
+  // playground::try_toy_duck_type();
+  // playground::try_await();
+  playground::try_await2();
   return 0;
 }

@@ -19,10 +19,13 @@
 #include <ostream>
 #include <queue>
 #include <ranges>
+#include <semaphore>
 #include <stdexcept>
+#include <stop_token>
 #include <thread>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "toyqueue.h"
@@ -229,9 +232,6 @@ void try_condition_variable_with_stop();
 
 struct stopable_cv {
   stopable_cv() noexcept = default;
-  ~stopable_cv() {
-    stop();  // UB if there is thread waiting for this cv, but nothing else can I do.
-  }
 
   bool is_stoped() const noexcept {
     return stoped.load();
@@ -270,99 +270,30 @@ enum class toy_msg : uint8_t { _int, _double, _string, _vec_int };
 
 namespace playground {
 
-template <typename T = void>
-struct coroutine_object;
-
-template <>
-struct coroutine_object<void> {
+struct co_task {
   struct promise_type {
-    bool done{false};
+    std::shared_ptr<std::binary_semaphore> done = std::make_shared<std::binary_semaphore>(0);
     auto get_return_object() {
-      return coroutine_object{std::coroutine_handle<promise_type>::from_promise(*this)};
+      return co_task{std::coroutine_handle<promise_type>::from_promise(*this), done};
     }
     auto initial_suspend() {
       return std::suspend_never{};
     }
     auto final_suspend() noexcept {
-      return std::suspend_always{};
-    }
-    void return_void() {
-      done = true;
-    }
-    void unhandled_exception() {}
-  };
-
-  coroutine_object() = default;
-  coroutine_object(std::coroutine_handle<promise_type> co_handle) : co_handle{co_handle} {}
-  coroutine_object(const coroutine_object& other) = delete;
-  coroutine_object(coroutine_object&& other) noexcept : co_handle{other.co_handle} {
-    other.co_handle = nullptr;
-  }
-  coroutine_object& operator=(const coroutine_object& other) = delete;
-  coroutine_object& operator=(coroutine_object&& other) noexcept {
-    co_handle = other.co_handle;
-    other.co_handle = nullptr;
-    return *this;
-  }
-
-  ~coroutine_object() {
-    if (co_handle) {
-      co_handle.destroy();
-    }
-  }
-
-  void get() const {  // block
-    co_handle.resume();
-  }
-
-  std::coroutine_handle<promise_type> co_handle;
-};
-
-template <typename T>
-  requires(!std::is_same_v<T, void>) && std::is_move_assignable_v<T>
-struct coroutine_object<T> {
-  struct promise_type {
-    std::optional<T> value;
-    auto get_return_object() {
-      return coroutine_object{std::coroutine_handle<promise_type>::from_promise(*this)};
-    }
-    auto initial_suspend() {
       return std::suspend_never{};
     }
-    auto final_suspend() noexcept {
-      return std::suspend_always{};
-    }
-    void return_value(T value) {
-      this->value = std::move(value);
+    void return_void() const {
+      done->release();
     }
     void unhandled_exception() {}
   };
 
-  coroutine_object() = default;
-  coroutine_object(std::coroutine_handle<promise_type> co_handle) : co_handle{co_handle} {}
-  coroutine_object(const coroutine_object& other) = delete;
-  coroutine_object(coroutine_object&& other) noexcept : co_handle{other.co_handle} {
-    other.co_handle = nullptr;
-  }
-  coroutine_object& operator=(const coroutine_object& other) = delete;
-  coroutine_object& operator=(coroutine_object&& other) noexcept {
-    co_handle = other.co_handle;
-    other.co_handle = nullptr;
-    return *this;
-  }
-
-  ~coroutine_object() {
-    if (co_handle) {
-      co_handle.destroy();
-    }
-  }
-
-  std::optional<T> get() const {  // block
-    co_handle.resume();
-    return co_handle.promise().value;
+  void sync_wait() const {
+    done->acquire();
   }
 
   std::coroutine_handle<promise_type> co_handle;
+  std::shared_ptr<std::binary_semaphore> done;
 };
 
 template <typename Suspend, typename Ready, typename Resume>
@@ -414,15 +345,225 @@ struct default_timestamp_generator {
   }
 };
 
+template <typename Derived>
+struct value_storage_base {
+  std::exception_ptr e_ptr{nullptr};
+
+  decltype(auto) get() {
+    if (e_ptr) {
+      std::rethrow_exception(e_ptr);
+    }
+    return derived().get_impl();
+  }
+
+  template <typename F>
+  void execute(F&& f) {
+    try {
+      derived().execute_impl(std::forward<F>(f));
+    } catch (...) {
+      e_ptr = std::current_exception();
+    }
+  }
+
+ private:
+  Derived& derived() {
+    return static_cast<Derived&>(*this);
+  }
+};
+
+template <typename T = void>
+struct value_storage : public value_storage_base<value_storage<T>> {
+  static_assert(!std::is_same_v<T, T>, "Invalid value_storage.");
+  using type = T;
+
+  void get_impl() noexcept {}
+  template <typename F>
+  void execute_impl(F&& f) {}
+};
+
+template <>
+struct value_storage<void> : public value_storage_base<value_storage<void>> {
+  using type = void;
+
+  void get_impl() noexcept {}
+  template <std::invocable F>
+  void execute_impl(F&& f) {
+    std::forward<F>(f)();
+  }
+};
+
+template <typename T>
+struct value_storage<T&> : public value_storage_base<value_storage<T&>> {
+  using type = T*;
+  type value{nullptr};
+
+  T& get_impl() noexcept {
+    return *value;
+  }
+
+  template <std::invocable F>
+    requires std::convertible_to<std::invoke_result_t<F>, T&>
+  void execute_impl(F&& f) {
+    set(std::forward<F>(f)());
+  }
+
+ private:
+  void set(T& _value) noexcept {
+    value = std::addressof(_value);
+  }
+};
+
+template <typename T>
+  requires std::is_default_constructible_v<T>
+struct value_storage<T> : public value_storage_base<value_storage<T>> {
+  using type = T;
+  type value{};
+
+  T& get_impl() noexcept {  // return T& instead of T, to avoid copy and support move
+    return value;
+  }
+
+  template <std::invocable F>
+    requires std::convertible_to<std::invoke_result_t<F>, T>
+  void execute_impl(F&& f) {
+    set(std::forward<F>(f)());
+  }
+
+ private:
+  void set(T _value) noexcept(std::is_nothrow_move_assignable_v<T>) {
+    value = std::move(_value);
+  }
+};
+
+template <typename T>
+  requires(!std::is_default_constructible_v<T>)
+struct value_storage<T> : public value_storage_base<value_storage<T>> {
+  using type = std::optional<T>;
+  type value;
+
+  T& get_impl() noexcept {
+    return value.value();
+  }
+
+  template <std::invocable F>
+    requires std::convertible_to<std::invoke_result_t<F>, T>
+  void execute_impl(F&& f) {
+    set(std::forward<F>(f)());
+  }
+
+ private:
+  void set(T _value) noexcept(std::is_nothrow_move_constructible_v<T> &&
+                              std::is_nothrow_move_assignable_v<T>) {
+    value = std::move(_value);
+  }
+};
+
+template <typename Stream, typename T, typename Op>
+concept stream_with_op = requires(Op op, Stream& s, T& data) { op(s, data); };
+
+template <typename Stream, typename T>
+concept istream_with = requires(Stream& is, T& data) { is >> data; };
+
+template <typename Stream, typename T>
+concept ostream_with = requires(Stream& os, T&& data) { os << std::forward<T>(data); };
+
+struct read_stream {
+  template <typename T>
+  using data_type = T&;
+
+  template <typename T, istream_with<T> Stream>
+  auto operator()(Stream& is, T& data) {
+    return is >> data;
+  }
+};
+
+struct write_stream {
+  template <typename T>
+  using data_type = T;
+
+  template <typename T, ostream_with<T> Stream>
+  auto operator()(Stream& os, T&& data) {
+    return os << std::forward<T>(data);
+  }
+};
+
+template <typename T, typename Op, stream_with_op<T, Op> Stream, typename Executor>
+class dispatcher {
+  Stream& stream;
+  Executor& executor;
+
+ public:
+  struct awaitable;
+
+  dispatcher(Stream& _stream, Executor& _executor) : stream{_stream}, executor{_executor} {}
+
+  template <typename U>
+  awaitable operator()(U&& data) {
+    return awaitable{.stream = stream, .executor = executor, .data = std::forward<U>(data)};
+  }
+};
+
+template <typename T, typename Op, stream_with_op<T, Op> Stream>
+struct to_execute_t {
+  using data_t = Op::template data_type<T>;  // either T or T&
+
+  Op* op;
+  Stream* stream;
+  T* data;
+
+  using retval_t = decltype((*op)(*stream, *data));
+  using storage_t = value_storage<retval_t>;
+
+  storage_t* retval;
+  std::coroutine_handle<> h;
+
+  void operator()() {
+    retval->execute([this]() { return (*op)(*stream, std::forward<data_t>(*data)); });
+    h.resume();
+  }
+
+  void cancel() {
+    if (h) {
+      h.destroy();
+    }
+  }
+};
+
+template <typename T, typename Op, stream_with_op<T, Op> Stream, typename Executor>
+struct dispatcher<T, Op, Stream, Executor>::awaitable {
+  Stream& stream;
+  Executor& executor;
+  Op::template data_type<T> data;
+  [[no_unique_address]] Op op{};
+
+  using retval_t = decltype(op(stream, data));
+  using storage_t = value_storage<retval_t>;
+  [[no_unique_address]] storage_t retval;
+
+  using _to_execute_t = to_execute_t<T, Op, Stream>;
+
+  bool await_ready() const noexcept {
+    return false;
+  }
+
+  void await_suspend(std::coroutine_handle<> h) {
+    executor(_to_execute_t{.op = &op, .stream = &stream, .data = &data, .retval = &retval, .h = h});
+  }
+
+  retval_t await_resume() {
+    return retval.get();
+  }
+};
+
+template <typename T, istream_with<T> Stream, typename Executor>
+using read_dispatcher = dispatcher<T, read_stream, Stream, Executor>;
+
+template <typename T, ostream_with<T> Stream, typename Executor>
+using write_dispatcher = dispatcher<T, write_stream, Stream, Executor>;
+
 enum class sync_stream_read_write_status : std::uint8_t { empty, good };
 
-template <typename stream>
-class read_dispatcher;
-
-template <typename stream>
-class write_dispatcher;
-
-template <typename T, std::invocable IDGen = default_id_generator,
+template <std::movable T, std::invocable IDGen = default_id_generator,
           std::invocable TSGen = default_timestamp_generator>
   requires requires(T t) {
     t.serial_number = std::declval<IDGen>()();
@@ -463,12 +604,27 @@ class sync_stream {
     return status::empty;
   }
 
+  template <typename U>
+    requires requires(U&& data) { msg_t{std::forward<U>(data)}; }
+  status operator<<(U&& data) {
+    return write_sync(std::forward<U>(data));
+  }
+
+  status operator>>(T& data) {
+    return read_sync(data);
+  }
+
   operator bool() const noexcept {
     return !queue.empty() || !cv.is_stoped();
   }
 
   void stop() {
     cv.stop();
+  }
+
+  template <typename Op, typename Executor>
+  auto get_dispatcher(Op op, Executor& executor) {
+    return dispatcher<msg_t, Op, sync_stream, Executor>{*this, executor};
   }
 
  private:
@@ -485,57 +641,68 @@ class sync_stream {
       std::swap(data, front);
       queue.pop_front();
     } else {  // data may be invalid when exceptions occur
-      data = queue.front();
+      data = std::move(queue.front());
       queue.pop_front();
     }
   }
 };
 
-template <typename stream>
-class write_dispatcher {
+template <typename T>
+concept cancellable = requires(T obj) { obj.cancel(); };
+
+template <std::movable F>
+class runner {
+  toyqueue::fix_cap_queue<F> queue;
+  std::stop_source stop_source;
+  std::counting_semaphore<> semaphore{0};
+  guarded_thread th;
+
+  void stop() {
+    stop_source.request_stop();
+    semaphore.release();
+  }
+
+  void drain() {
+    if constexpr (cancellable<F>) {
+      while (!queue.empty()) {
+        auto task = queue.try_pop();
+        if (task.has_value()) {
+          task.value().cancel();
+        }
+      }
+    } else {
+    }
+  }
+
+  void run() {
+    auto stop_token = stop_source.get_token();
+    while (true) {
+      semaphore.acquire();
+      if (stop_token.stop_requested()) {
+        drain();
+        return;
+      }
+      auto task = queue.try_pop();
+      if (task.has_value()) {
+        task.value()();
+      }
+    }
+  }
+
  public:
-  using stream_t = stream;
-  using msg_t = stream::msg_t;
-  using status_t = stream::status;
+  runner(size_t log_cap = 16) : queue{log_cap}, th{std::thread{[this]() { run(); }}} {}
 
-  write_dispatcher(stream_t& s, size_t buffer_cap)
-      : queue{buffer_cap}, s{s}, th{std::thread{[this]() { this->work(); }}} {}
-
-  ~write_dispatcher() {
-    // tell th to stop running, events happen in the order:
-    // cv.stop() => th->join() => th deconstructed => cv deconstructed, so it is safe
-    cv.stop();
+  ~runner() {
+    stop();
   }
 
   template <typename U>
-    requires requires(U&& data) { msg_t{std::forward<U>(data)}; }
-  void dispatch(U&& data) {
-    {
-      std::lock_guard lock{mutex};
-      queue.push(msg_t{std::forward<U>(data)});
+  void operator()(U&& task) {
+    F f{std::forward<U>(task)};
+    while (!queue.try_push(std::move(f))) {
+      std::this_thread::yield();
     }
-    cv->notify_one();
-  }
-
- private:
-  toyqueue::fix_cap_queue<msg_t> queue{20};
-  std::mutex mutex;
-  stopable_cv cv;
-  stream_t& s;
-  guarded_thread th;  // construct after cv, deconstruct before cv
-
-  void work() {
-    while (!cv.is_stoped()) {
-      {
-        std::unique_lock lock{mutex};
-        cv->wait(lock, [this]() { return !queue.empty() || cv.is_stoped(); });
-      }
-      if (!queue.empty()) {
-        // concurrency write will not cause queue become empty
-        s.write_sync(std::move(queue.front()));
-        queue.pop();
-      }
-    }
+    semaphore.release();
   }
 };
 
@@ -583,5 +750,9 @@ inline void toy_task_test() {
 void try_toy_queue3();
 
 void try_toy_duck_type();
+
+void try_await();
+
+void try_await2();
 
 }  // namespace playground

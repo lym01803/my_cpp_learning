@@ -6,6 +6,7 @@
 #include <concepts>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <initializer_list>
@@ -22,6 +23,7 @@
 #include <shared_mutex>
 #include <stdexcept>
 #include <stop_token>
+#include <string_view>
 #include <thread>
 #include <tuple>
 #include <type_traits>
@@ -900,6 +902,173 @@ void try_toy_duck_type() {
   std::cout << h() << std::endl;
   auto k = toy_lambda<add, int&, int&>(add{}, x, y);  // 真-引用捕获
   std::cout << k() << std::endl;
+}
+
+void try_await() {
+  using msg_t = msg::message<std::variant<std::monostate, int, double>>;
+  using stream_t = sync_stream<msg_t>;
+
+  std::atomic<double> sum{0.0};
+
+  stream_t stream;
+  auto read_worker = runner<to_execute_t<msg_t, read_stream, stream_t>>();
+  auto write_worker = runner<to_execute_t<msg_t, write_stream, stream_t>>();
+  auto reader = stream.get_dispatcher(read_stream{}, read_worker);
+  auto writer = stream.get_dispatcher(write_stream{}, write_worker);
+
+  guarded_thread writer1{std::thread{[&]() {
+    for (size_t i = 0; i < 50; i++) {
+      [&]() -> co_task { co_await writer(1); }();
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+  }}};
+
+  guarded_thread writer2{std::thread{[&]() {
+    for (size_t i = 0; i < 200; i++) {
+      [&]() -> co_task { co_await writer(0.25); }();
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }}};
+
+  auto t = timer_wrap([&]() {
+    for (size_t i = 0; i < 250; i++) {
+      [&]() -> co_task {
+        msg_t msg;
+        co_await reader(msg);
+        if (msg) {
+          std::visit(temp_visitor{[&](int value) { sum += (double)value; },
+                                  [&](double value) { sum += value; }, [&](auto& value) {}},
+                     msg.data);
+        }
+      }();
+    }
+  })();
+  std::cout << t << std::endl;
+
+  for (size_t i = 0; i < 500; i++) {
+    std::cout << sum << std::endl;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+}
+
+namespace {
+
+struct uniform_random {
+  std::mt19937_64 gen{std::random_device{}()};
+  std::uniform_int_distribution<int> dist;
+  std::mutex mutex;
+
+  uniform_random(int l, int r) : dist{l, r} {}
+  int operator()() {
+    std::lock_guard lock{mutex};
+    return dist(gen);
+  }
+};
+
+struct toy_server {
+  struct request_t {
+    int num_of_char;
+  };
+
+  enum class code_t : uint8_t { Done, Streaming };
+
+  struct response_t {
+    code_t code;
+    std::string content;
+  };
+
+  using msg_t = msg::message<std::variant<std::monostate, response_t>>;
+  using stream_t = sync_stream<msg_t>;
+
+  uniform_random rd{1, 100};
+  std::vector<guarded_thread> tasks;
+
+  void request(request_t req, std::weak_ptr<stream_t> receive) {
+    tasks.emplace_back(std::thread{[this, req, receive = std::move(receive)]() {
+      for (size_t i = 0; i < req.num_of_char; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(rd()));
+        if (auto _receive = receive.lock()) {
+          _receive->write_sync(response_t{.code = code_t::Streaming, .content = "x"});
+        } else {
+          break;
+        }
+      }
+      if (auto _receive = receive.lock()) {
+        _receive->write_sync(response_t{.code = code_t::Done});
+      }
+    }});
+  }
+};
+
+struct toy_client {
+  using request_t = toy_server::request_t;
+  using response_t = toy_server::response_t;
+  using msg_t = msg::message<std::variant<std::monostate, response_t>>;
+  using stream_t = sync_stream<msg_t>;
+
+  struct stream_response_t {
+    std::shared_ptr<stream_t> stream;
+    std::unique_ptr<runner<to_execute_t<msg_t, read_stream, stream_t>>> worker{
+        new runner<to_execute_t<msg_t, read_stream, stream_t>>{3}};  // cap = 8
+    using dispatcher_t = decltype(stream->get_dispatcher(read_stream{}, *worker));
+    dispatcher_t dispatcher = stream->get_dispatcher(read_stream{}, *worker);
+
+    using chunk_t = msg::message<std::variant<std::monostate, std::string_view>>;
+
+    struct chunk_awaitable : public dispatcher_t::awaitable {
+      using base = dispatcher_t::awaitable;
+
+      chunk_t await_resume() {
+        auto ret = base::await_resume();
+        if (ret == stream_t::status::good) {
+          if (data.data_t_same_as<response_t>()) {
+            auto resp = std::get<response_t>(data.data);
+            if (resp.code == toy_server::code_t::Streaming) {
+              return chunk_t{std::string_view{resp.content}};
+            }
+          }
+        }
+        return chunk_t{};
+      }
+    };
+
+    auto get_chunk(msg_t& msg_buffer) {
+      return chunk_awaitable{dispatcher(msg_buffer)};
+    }
+  };
+
+  stream_response_t stream_request(toy_server& server, int num) {
+    stream_response_t resp{std::make_shared<stream_t>()};
+    server.request(request_t{.num_of_char = num}, resp.stream);
+    return resp;
+  }
+};
+
+}  // namespace
+
+void try_await2() {
+  auto server = toy_server{};
+  auto client = toy_client{};
+  using msg_t = toy_client::msg_t;
+  using response_t = toy_client::response_t;
+  auto resp = client.stream_request(server, 100);
+  using resp_t = decltype(resp);
+
+  auto task = [](resp_t& resp) -> co_task {
+    msg_t msg_buffer;
+    while (true) {
+      auto chunk = co_await resp.get_chunk(msg_buffer);
+      if (chunk) {
+        auto ch = std::get<std::string_view>(chunk.data);
+        std::cout << ch << std::flush;
+      } else {
+        break;
+      }
+    }
+    std::cout << std::endl;
+  }(resp);
+
+  task.sync_wait();
 }
 
 }  // namespace playground

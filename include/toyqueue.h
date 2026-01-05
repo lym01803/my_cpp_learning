@@ -104,14 +104,16 @@ class fix_cap_queue {
   }
 
   /**
-   @return bool, 尝试 push 失败时返回 false;
+   @return bool, 尝试 push 失败时返回 false, value 状态不变;
    @note 当且仅当 push 成功时, 通过 CAS 原子地移动 tail 指针;
          push 失败当且仅当尝试 CAS 前看到的队列为满 (from the view of this thread);
          自旋地等到 data location 的 flag 为 empty, 才会 push 写入, 并返回 true;
          当 data location 的 flag 置为 not_empty 时 (memory_order_release), push 完成;
          应尽可能保证 T 类型 移动构造/赋值 nothrow, push 构造时发生异常会丢失数据, 但队列仍有效;
    */
-  bool try_push(T value) noexcept(std::is_nothrow_move_constructible_v<T>) {
+  template <typename U>
+    requires requires(std::optional<value_t> data, U&& value) { data = std::forward<U>(value); }
+  bool try_push(U&& value) noexcept(std::is_nothrow_move_constructible_v<T>) {
     index_t cur_tail = tail.load(std::memory_order_relaxed);
     bool not_full{};
     while ((not_full = !full_(head.load(std::memory_order_relaxed), cur_tail)) &&
@@ -130,7 +132,7 @@ class fix_cap_queue {
     }
     flag_guard fg{.flag = loc.flag, .set_to = status::not_empty};
     clear_data_guard dg{loc.data};
-    loc.data = std::move(value);
+    loc.data = std::forward<U>(value);
     dg.disable = true;
     return true;
   }
