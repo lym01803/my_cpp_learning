@@ -32,6 +32,7 @@
 
 #include "message.h"
 #include "toyqueue.h"
+#include "async_tool.h"
 
 namespace playground {
 
@@ -905,6 +906,7 @@ void try_toy_duck_type() {
 }
 
 void try_await() {
+  using namespace async;
   using msg_t = msg::message<std::variant<std::monostate, int, double>>;
   using stream_t = sync_stream<msg_t>;
 
@@ -1008,10 +1010,10 @@ struct toy_client {
 
   struct stream_response_t {
     std::shared_ptr<stream_t> stream;
-    std::unique_ptr<runner<to_execute_t<msg_t, read_stream, stream_t>>> worker{
-        new runner<to_execute_t<msg_t, read_stream, stream_t>>{3}};  // cap = 8
-    using dispatcher_t = decltype(stream->get_dispatcher(read_stream{}, *worker));
-    dispatcher_t dispatcher = stream->get_dispatcher(read_stream{}, *worker);
+    std::unique_ptr<runner<async::to_execute_t<msg_t, async::read_stream, stream_t>>> worker{
+        new runner<async::to_execute_t<msg_t, async::read_stream, stream_t>>{3}};  // cap = 8
+    using dispatcher_t = decltype(stream->get_dispatcher(async::read_stream{}, *worker));
+    dispatcher_t dispatcher = stream->get_dispatcher(async::read_stream{}, *worker);
 
     using chunk_t = msg::message<std::variant<std::monostate, std::string_view>>;
 
@@ -1058,6 +1060,7 @@ struct toy_range {
 }  // namespace
 
 void try_await2() {
+  using namespace async;
   auto server = toy_server{};
   auto client = toy_client{};
   using msg_t = toy_client::msg_t;
@@ -1084,6 +1087,7 @@ void try_await2() {
 }
 
 void try_await3() {
+  using namespace async;
   auto server = toy_server{};
   auto client = toy_client{};
   using msg_t = toy_client::msg_t;
@@ -1115,6 +1119,7 @@ void try_await3() {
 }
 
 void try_await4() {
+  using namespace async;
   auto server = toy_server{};
   auto client = toy_client{};
   using msg_t = toy_client::msg_t;
@@ -1144,6 +1149,7 @@ void try_await4() {
 }
 
 void try_await5() {
+  using namespace async;
   auto server = toy_server{};
   auto client = toy_client{};
   using msg_t = toy_client::msg_t;
