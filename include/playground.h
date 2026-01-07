@@ -801,6 +801,65 @@ struct co_task_awaitable {
 
 using co_task = co_task_with<>;
 
+struct cancel_mixin {
+  std::function<void()> _cancel{[]() {}};
+  void cancel() const {
+    _cancel();
+  }
+};
+
+template <typename R, typename... Args>
+struct call_mixin {
+  std::function<R(Args...)> call;
+  R operator()(Args... args) {
+    return call(std::forward<Args>(args)...);
+  }
+};
+
+template <typename R, typename... Args>
+struct cancellable_function : public cancel_mixin, call_mixin<R, Args...> {
+  using cancel_base = cancel_mixin;
+  using call_base = call_mixin<R, Args...>;
+
+  template <typename F, typename C>
+  cancellable_function(F func, C cancel)
+      : cancel_base{std::move(cancel)}, call_base{std::move(func)} {}
+
+  template <typename F>
+  cancellable_function(F func) : cancel_base{}, call_base{std::move(func)} {}
+};
+
+template <typename T, typename Op, stream_with_op<T, Op> Stream>
+auto to_function(to_execute_t<T, Op, Stream> to_execute) {
+  std::coroutine_handle<> h = to_execute.h;
+  return cancellable_function<void>([f = std::move(to_execute)]() { f(); },  // execute
+                                    [h]() {                                  // cancel
+                                      if (h) {
+                                        h.destroy();
+                                      }
+                                    });
+}
+
+template <typename Executor>
+struct execute_by_awaitable {
+  Executor& executor;
+  bool await_ready() const noexcept {
+    return false;
+  }
+  void await_suspend(std::coroutine_handle<> h) noexcept {
+    executor(cancellable_function<void> {
+      [=]() { h.resume(); },
+      [=]() { h.destroy(); }
+    });
+  }
+  void await_resume() const noexcept {}
+};
+
+template <typename Executor>
+auto execute_by(Executor& executor) {
+  return execute_by_awaitable{executor};
+}
+
 void try_message();
 
 void try_msg_stream();
@@ -851,5 +910,9 @@ void try_await();
 void try_await2();
 
 void try_await3();
+
+void try_await4();
+
+void try_await5();
 
 }  // namespace playground

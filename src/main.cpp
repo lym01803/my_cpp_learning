@@ -22,5 +22,7 @@ int main() {
   // playground::try_await();
   playground::try_await2();
   playground::try_await3();
+  playground::try_await4();
+  playground::try_await5();
   return 0;
 }

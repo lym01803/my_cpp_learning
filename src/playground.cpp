@@ -1114,4 +1114,64 @@ void try_await3() {
   task.sync_wait();
 }
 
+void try_await4() {
+  auto server = toy_server{};
+  auto client = toy_client{};
+  using msg_t = toy_client::msg_t;
+  using response_t = toy_client::response_t;
+  auto resp = client.stream_request(server, 100);
+
+  auto executor = runner<cancellable_function<void>>{};
+
+  auto task = []<typename resp_t, typename executor_t>(resp_t& resp,
+                                                       executor_t& executor) -> co_task {
+    msg_t msg_buffer;
+    while (true) {
+      auto chunk = co_await resp.get_chunk(msg_buffer);
+      co_await execute_by(executor);
+      if (chunk) {
+        auto ch = std::get<std::string_view>(chunk.data);
+        std::cout << ch << std::flush;
+      } else {
+        break;
+      }
+    }
+    std::cout << std::endl;
+  }(resp, executor).launch();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+  task.sync_wait();
+}
+
+void try_await5() {
+  auto server = toy_server{};
+  auto client = toy_client{};
+  using msg_t = toy_client::msg_t;
+  using response_t = toy_client::response_t;
+  auto resp = client.stream_request(server, 100);
+
+  auto executor = runner<cancellable_function<void>>{};
+
+  auto task = []<typename resp_t, typename executor_t>(resp_t& resp,
+                                                       executor_t& executor) -> co_task {
+    msg_t msg_buffer;
+    while (true) {
+      auto chunk = co_await resp.get_chunk(msg_buffer);
+      co_await execute_by(executor);
+      if (chunk) {
+        auto ch = std::get<std::string_view>(chunk.data);
+        std::cout << ch << std::flush;
+      } else {
+        break;
+      }
+    }
+    std::cout << std::endl;
+  }(resp, executor).launch();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+  // task.sync_wait();
+  // 提前结束, 析构 executor 和 resp (RAII 管理 IO runner), 测试是否能正确 destroy 等待 resume
+  // 的协程.
+}
+
 }  // namespace playground
