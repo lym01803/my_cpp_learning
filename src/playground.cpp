@@ -918,14 +918,14 @@ void try_await() {
 
   guarded_thread writer1{std::thread{[&]() {
     for (size_t i = 0; i < 50; i++) {
-      [&]() -> co_task { co_await writer(1); }();
+      [&]() -> co_task { co_await writer(1); }().launch();
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
   }}};
 
   guarded_thread writer2{std::thread{[&]() {
     for (size_t i = 0; i < 200; i++) {
-      [&]() -> co_task { co_await writer(0.25); }();
+      [&]() -> co_task { co_await writer(0.25); }().launch();
       std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
   }}};
@@ -940,7 +940,7 @@ void try_await() {
                                   [&](double value) { sum += value; }, [&](auto& value) {}},
                      msg.data);
         }
-      }();
+      }().launch();
     }
   })();
   std::cout << t << std::endl;
@@ -1022,7 +1022,7 @@ struct toy_client {
         auto ret = base::await_resume();
         if (ret == stream_t::status::good) {
           if (data.data_t_same_as<response_t>()) {
-            auto resp = std::get<response_t>(data.data);
+            auto& resp = data.get<response_t>();
             if (resp.code == toy_server::code_t::Streaming) {
               return chunk_t{std::string_view{resp.content}};
             }
@@ -1042,6 +1042,17 @@ struct toy_client {
     server.request(request_t{.num_of_char = num}, resp.stream);
     return resp;
   }
+};
+
+// template <std::movable T, std::invocable<T> Stop, std::invocable<T> Fetch>
+//   requires std::is_same_v<std::invoke_result_t<Stop, T>, bool>
+struct toy_range {
+  using T = msg::message<std::variant<std::monostate, std::string>>;
+  using Stop = decltype([](const T& data) -> bool { return !(bool)data; });
+
+  struct iterator {
+    // T operator*() {}
+  };
 };
 
 }  // namespace
@@ -1066,8 +1077,40 @@ void try_await2() {
       }
     }
     std::cout << std::endl;
-  }(resp);
+  }(resp).launch();
 
+  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+  task.sync_wait();
+}
+
+void try_await3() {
+  auto server = toy_server{};
+  auto client = toy_client{};
+  using msg_t = toy_client::msg_t;
+  using response_t = toy_client::response_t;
+  auto resp = client.stream_request(server, 100);
+  using resp_t = decltype(resp);
+
+  auto task = [](resp_t& resp) -> co_task {
+    msg_t msg_buffer;
+    while (true) {
+      // no capture
+      auto mini_task = [](resp_t& resp, msg_t& buffer) -> co_task_with<resp_t::chunk_t> {
+        co_return co_await resp.get_chunk(buffer);
+      }(resp, msg_buffer);
+
+      auto chunk = co_await mini_task.wait();
+      if (chunk) {
+        auto ch = std::get<std::string_view>(chunk.data);
+        std::cout << ch << std::flush;
+      } else {
+        break;
+      }
+    }
+    std::cout << std::endl;
+  }(resp).launch();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   task.sync_wait();
 }
 

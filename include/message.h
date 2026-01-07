@@ -106,6 +106,14 @@ struct message {
   serial_number_t serial_number{};
   std::optional<timestamp_t> timestamp;
 
+  operator V const&() const noexcept {
+    return data;
+  }
+
+  operator V&() noexcept {
+    return data;
+  }
+
   auto operator<=>(const message& other) const noexcept {
     return serial_number <=> other.serial_number;
   }
@@ -141,6 +149,16 @@ struct message {
 
   V const* operator->() const noexcept {
     return &data;
+  }
+
+  template <type_in_variant<V> T>
+  T const& get() const {
+    return std::get<T>(data);
+  }
+
+  template <type_in_variant<V> T>
+  T& get() {
+    return std::get<T>(data);
   }
 };
 

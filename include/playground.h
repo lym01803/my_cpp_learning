@@ -270,32 +270,6 @@ enum class toy_msg : uint8_t { _int, _double, _string, _vec_int };
 
 namespace playground {
 
-struct co_task {
-  struct promise_type {
-    std::shared_ptr<std::binary_semaphore> done = std::make_shared<std::binary_semaphore>(0);
-    auto get_return_object() {
-      return co_task{std::coroutine_handle<promise_type>::from_promise(*this), done};
-    }
-    auto initial_suspend() {
-      return std::suspend_never{};
-    }
-    auto final_suspend() noexcept {
-      return std::suspend_never{};
-    }
-    void return_void() const {
-      done->release();
-    }
-    void unhandled_exception() {}
-  };
-
-  void sync_wait() const {
-    done->acquire();
-  }
-
-  std::coroutine_handle<promise_type> co_handle;
-  std::shared_ptr<std::binary_semaphore> done;
-};
-
 template <typename Suspend, typename Ready, typename Resume>
   requires requires(Suspend suspend, const Ready& ready, Resume resume) {
     { suspend() } -> std::same_as<void>;
@@ -349,11 +323,18 @@ template <typename Derived>
 struct value_storage_base {
   std::exception_ptr e_ptr{nullptr};
 
-  decltype(auto) get() {
+  decltype(auto) get() & {
     if (e_ptr) {
       std::rethrow_exception(e_ptr);
     }
     return derived().get_impl();
+  }
+
+  decltype(auto) get() && {
+    if (e_ptr) {
+      std::rethrow_exception(e_ptr);
+    }
+    return std::move(derived()).get_impl();
   }
 
   template <typename F>
@@ -385,7 +366,7 @@ template <>
 struct value_storage<void> : public value_storage_base<value_storage<void>> {
   using type = void;
 
-  void get_impl() noexcept {}
+  void get_impl() const noexcept {}
   template <std::invocable F>
   void execute_impl(F&& f) {
     std::forward<F>(f)();
@@ -397,7 +378,7 @@ struct value_storage<T&> : public value_storage_base<value_storage<T&>> {
   using type = T*;
   type value{nullptr};
 
-  T& get_impl() noexcept {
+  T& get_impl() const noexcept {
     return *value;
   }
 
@@ -407,20 +388,23 @@ struct value_storage<T&> : public value_storage_base<value_storage<T&>> {
     set(std::forward<F>(f)());
   }
 
- private:
   void set(T& _value) noexcept {
     value = std::addressof(_value);
   }
 };
 
 template <typename T>
-  requires std::is_default_constructible_v<T>
+  requires std::is_trivially_constructible_v<T>
 struct value_storage<T> : public value_storage_base<value_storage<T>> {
   using type = T;
   type value{};
 
-  T& get_impl() noexcept {  // return T& instead of T, to avoid copy and support move
+  T& get_impl() & noexcept {  // return T& instead of T, to avoid copy and support move
     return value;
+  }
+
+  T get_impl() && noexcept {
+    return std::move(value);
   }
 
   template <std::invocable F>
@@ -429,20 +413,23 @@ struct value_storage<T> : public value_storage_base<value_storage<T>> {
     set(std::forward<F>(f)());
   }
 
- private:
   void set(T _value) noexcept(std::is_nothrow_move_assignable_v<T>) {
     value = std::move(_value);
   }
 };
 
 template <typename T>
-  requires(!std::is_default_constructible_v<T>)
+  requires(!std::is_trivially_constructible_v<T>)
 struct value_storage<T> : public value_storage_base<value_storage<T>> {
   using type = std::optional<T>;
   type value;
 
-  T& get_impl() noexcept {
+  T& get_impl() & noexcept {
     return value.value();
+  }
+
+  T get_impl() && noexcept {
+    return std::move(value.value());
   }
 
   template <std::invocable F>
@@ -451,7 +438,6 @@ struct value_storage<T> : public value_storage_base<value_storage<T>> {
     set(std::forward<F>(f)());
   }
 
- private:
   void set(T _value) noexcept(std::is_nothrow_move_constructible_v<T> &&
                               std::is_nothrow_move_assignable_v<T>) {
     value = std::move(_value);
@@ -551,7 +537,7 @@ struct dispatcher<T, Op, Stream, Executor>::awaitable {
   }
 
   retval_t await_resume() {
-    return retval.get();
+    return std::move(retval).get();
   }
 };
 
@@ -706,6 +692,115 @@ class runner {
   }
 };
 
+struct done_mixin {
+  std::shared_ptr<std::binary_semaphore> done = std::make_shared<std::binary_semaphore>(0);
+  void _return() const {
+    done->release();
+  }
+};
+
+struct return_void_mixin : public done_mixin {
+  using base = done_mixin;
+  [[no_unique_address]] value_storage<void> retval;
+  void return_void() const {
+    base::_return();
+  }
+};
+
+template <typename T>
+struct return_value_mixin : public done_mixin {
+  using base = done_mixin;
+  [[no_unique_address]] value_storage<T> retval;
+  void return_value(T value) {
+    retval.set(std::forward<T>(value));
+    base::_return();
+  }
+};
+
+template <typename T>
+using return_mixin =
+    std::conditional_t<std::is_same_v<T, void>, return_void_mixin, return_value_mixin<T>>;
+
+template <typename T>
+struct co_task_awaitable;
+
+template <typename T = void>
+struct co_task_with {
+  struct final_awaitable {
+    std::coroutine_handle<> next{nullptr};
+    bool await_ready() const noexcept {
+      return !next;
+    }
+    auto await_suspend(std::coroutine_handle<> h) const noexcept {
+      return next;
+    }
+    void await_resume() const noexcept {}
+  };
+
+  struct promise_type : public return_mixin<T> {
+    std::coroutine_handle<> next{nullptr};
+    auto get_return_object() {
+      return co_task_with{.co_handle = std::coroutine_handle<promise_type>::from_promise(*this),
+                          .done = this->done,
+                          .promise = *this};
+    }
+    auto initial_suspend() {
+      return std::suspend_always{};
+    }
+    auto final_suspend() noexcept {
+      return final_awaitable{next};
+    }
+    void unhandled_exception() {}
+  };
+
+  co_task_with& launch() & {
+    co_handle.resume();
+    return *this;
+  }
+
+  co_task_with launch() && {
+    co_handle.resume();
+    return std::move(*this);
+  }
+
+  co_task_awaitable<T> wait() & {
+    return co_task_awaitable<T>{*this};
+  }
+
+  void sync_wait() const {
+    done->acquire();
+  }
+
+  void hook_next(std::coroutine_handle<> h) noexcept {
+    promise.next = h;
+  }
+
+  std::coroutine_handle<promise_type> co_handle;
+  std::shared_ptr<std::binary_semaphore> done;
+  promise_type& promise;
+};
+
+template <typename T>
+struct co_task_awaitable {
+  using task_t = co_task_with<T>;
+  task_t& task;
+
+  bool await_ready() const noexcept {
+    return false;
+  }
+  auto await_suspend(std::coroutine_handle<> h) const noexcept {
+    task.hook_next(h);
+    return task.co_handle;  // transfer to run co_handle.resume();
+  }
+  T await_resume() const noexcept {
+    value_storage<T> value{std::move(task.promise.retval)};
+    task.co_handle.destroy();
+    return std::move(value).get();
+  }
+};
+
+using co_task = co_task_with<>;
+
 void try_message();
 
 void try_msg_stream();
@@ -754,5 +849,7 @@ void try_toy_duck_type();
 void try_await();
 
 void try_await2();
+
+void try_await3();
 
 }  // namespace playground

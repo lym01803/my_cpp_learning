@@ -21,5 +21,6 @@ int main() {
   // playground::try_toy_duck_type();
   // playground::try_await();
   playground::try_await2();
+  playground::try_await3();
   return 0;
 }
