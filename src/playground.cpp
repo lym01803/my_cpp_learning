@@ -935,7 +935,7 @@ void try_await() {
 
   auto t = timer_wrap([&]() {
     for (size_t i = 0; i < 250; i++) {
-      [&]() -> co_task {
+      []<typename R, typename S>(R& reader, S& sum) -> co_task {
         msg_t msg;
         co_await reader(msg);
         if (msg) {
@@ -943,15 +943,16 @@ void try_await() {
                                   [&](double value) { sum += value; }, [&](auto& value) {}},
                      msg.data);
         }
-      }().detach();
+      }(reader, sum).detach();
     }
   })();
   std::cout << t << std::endl;
 
   for (size_t i = 0; i < 500; i++) {
-    std::cout << sum << std::endl;
+    std::cout << std::format("\033[2K\r{}", (double)sum) << std::flush;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
+  std::cout << std::endl;
 }
 
 namespace {
@@ -1081,10 +1082,11 @@ void try_await2() {
       }
     }
     std::cout << std::endl;
-  }(resp).detach();
+  }(resp).get_future();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   task.wait();
+  std::future<int> x;
 }
 
 void try_await3() {
@@ -1113,7 +1115,7 @@ void try_await3() {
       }
     }
     std::cout << std::endl;
-  }(resp).detach();
+  }(resp).get_future();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   task.wait();
@@ -1143,7 +1145,7 @@ void try_await4() {
       }
     }
     std::cout << std::endl;
-  }(resp, executor).detach();
+  }(resp, executor).get_future();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   task.wait();
@@ -1159,7 +1161,7 @@ void try_await5() {
 
   auto executor = runner<cancellable_function<void>>{};
 
-  auto task = []<typename resp_t, typename executor_t>(resp_t& resp,
+  []<typename resp_t, typename executor_t>(resp_t& resp,
                                                        executor_t& executor) -> co_task {
     msg_t msg_buffer;
     while (true) {
@@ -1176,7 +1178,6 @@ void try_await5() {
   }(resp, executor).detach();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-  // task.wait();
   // 提前结束, 析构 executor 和 resp (RAII 管理 IO runner), 测试是否能正确 destroy 等待 resume
   // 的协程.
 }
@@ -1202,13 +1203,13 @@ void try_await6() {
     co_await async::execute_by(async::trivial_executor);
     long long result{0};
     for (auto& subtask : subtasks) {
-      result += subtask.get();
+      result += subtask.wait();
     }
     co_return result;
   }(nums).get_future();
 
   std::cout << "Do something else here...\n" << std::flush;
-  std::cout << std::format("result = {}\n", task.get()) << std::flush;
+  std::cout << std::format("result = {}\n", task.wait()) << std::flush;
 }
 
 }  // namespace playground

@@ -139,12 +139,21 @@ struct value_storage<T> : public value_storage_base<value_storage<T>> {
   }
 };
 
+/**
+ * @brief Concept: 约束 Op 是否可以作用于 Stream 和 T
+ */
 template <typename Stream, typename T, typename Op>
 concept stream_with_op = requires(Op op, Stream& s, T& data) { op(s, data); };
 
+/**
+ * @brief Concept: 约束 Stream 是否支持读取 T (operator>>)
+ */
 template <typename Stream, typename T>
 concept istream_with = requires(Stream& is, T& data) { is >> data; };
 
+/**
+ * @brief Concept: 约束 Stream 是否支持写入 T (operator<<)
+ */
 template <typename Stream, typename T>
 concept ostream_with = requires(Stream& os, T&& data) { os << std::forward<T>(data); };
 
@@ -168,6 +177,11 @@ struct write_stream {
   }
 };
 
+/**
+ * @brief 异步操作分发器
+ * * 负责将具体的 IO 操作（流、数据、操作符）绑定到执行器（Executor）上。
+ * * 通过生成 awaitable 对象，利用协程机制将操作打包为 `to_execute_t` 投递给 Executor。
+ */
 template <typename T, typename Op, stream_with_op<T, Op> Stream, typename Executor>
 class dispatcher {
   Stream& stream;
@@ -178,12 +192,22 @@ class dispatcher {
 
   dispatcher(Stream& _stream, Executor& _executor) : stream{_stream}, executor{_executor} {}
 
+  /**
+   * @brief 生成等待对象
+   * @return awaitable 当被 co_await 时，会触发异步执行
+   */
   template <typename U>
   awaitable operator()(U&& data) {
     return awaitable{.stream = stream, .executor = executor, .data = std::forward<U>(data)};
   }
 };
 
+/**
+ * @brief 内部执行包 (Design Note)
+ * * 设计意图：为了提供一种**不做类型擦除**且**零开销**的执行上下文传递机制。
+ * 它保留了 Op, Stream, Data 的具体类型信息，直接在 Executor 中通过泛型展开执行，避免了
+ * std::function 等带来的虚函数或内存分配开销。
+ */
 template <typename T, typename Op, stream_with_op<T, Op> Stream>
 struct to_execute_t {
   using data_t = Op::template data_type<T>;  // either T or T&
@@ -246,34 +270,16 @@ using write_dispatcher = dispatcher<T, write_stream, Stream, Executor>;
 template <typename T>
 concept cancellable = requires(T obj) { obj.cancel(); };
 
-struct done_mixin {
-  std::shared_ptr<std::binary_semaphore> done{nullptr};
-  void _return() const {
-    if (done) {
-      done->release();
-    }
-  }
-  std::shared_ptr<std::binary_semaphore> get_done() {
-    done = std::make_shared<std::binary_semaphore>(0);
-    return done;
-  }
-};
-
-struct return_void_mixin : public done_mixin {
-  using base = done_mixin;
+struct return_void_mixin {
   [[no_unique_address]] value_storage<void> retval;
-  void return_void() const {
-    base::_return();
-  }
+  void return_void() const {}
 };
 
 template <typename T>
-struct return_value_mixin : public done_mixin {
-  using base = done_mixin;
+struct return_value_mixin {
   [[no_unique_address]] value_storage<T> retval;
   void return_value(T value) {
     retval.set(std::forward<T>(value));
-    base::_return();
   }
 };
 
@@ -284,6 +290,11 @@ using return_mixin =
 template <typename T>
 struct co_task_awaitable;
 
+/**
+ * @brief 任务 Future 手柄
+ * * 同步等待 task 返回结果: 基于 std::binary_semaphore (counting_semaphore) 实现阻塞/唤醒。
+ * @note 仅保证**第一次**调用 wait() 有效（资源移动语义）。
+ */
 template <typename T>
 struct task_future {
   struct state {
@@ -293,23 +304,24 @@ struct task_future {
   std::shared_ptr<state> state_ptr = std::make_shared<state>();
 
   /**
-   仅保证第一次调用有效
+   * @brief 阻塞当前线程直到任务完成并获取结果, 仅保证第一次调用有效
    */
-  decltype(auto) get() {
+  decltype(auto) wait() {
     state_ptr->done.acquire();
     return std::move(state_ptr->retval).get();
   }
 };
 
-struct task_done {
-  std::shared_ptr<std::binary_semaphore> semaphore;
-  void wait() const {
-    if (semaphore) {
-      semaphore->acquire();
-    }
-  }
-};
-
+/**
+ * @brief 通用协程任务 (Lazy 模式)
+ * * * **设计模式**：Lazy Execution。协程创建后处于暂停状态，必须显式启动。
+ * * * **三种互斥的启动方式**：
+ * 1. `detach()`: 分离执行, 无法获取 task 的结果;
+ * 2. `get_future()`: 启动并返回 task_future，用于同步等待返回值;
+ * 3. `co_await`: 在另一个协程中等待执行器异步执行并返回结果;
+ * * * **注意**：这三种方式仅对处在 initial_suspend 之后、首次 resume 之前的对象有效。
+ * co_task_with 对象只是启动器, 一旦选定一种方式启动, co_task_with 对象即失效.
+ */
 template <typename T = void>
 struct co_task_with {
   struct final_awaitable {
@@ -338,13 +350,17 @@ struct co_task_with {
     void unhandled_exception() {}
   };
 
-  task_done detach() & {
-    auto _done = promise.get_done();
+  /**
+   * @brief 分离任务: 启动协程
+   */
+  void detach() & {
     co_handle.resume();
-    return task_done{_done};
   }
 
-  task_done detach() && {
+  /**
+   * @brief 分离任务: 启动协程
+   */
+  void detach() && {
     return this->detach();
   }
 
@@ -352,6 +368,10 @@ struct co_task_with {
     return co_task_awaitable<T>{*this};
   }
 
+  /**
+   * @brief 协程等待, 支持直接 `co_await task;`。
+   * * 行为: 等待执行器异步执行，任务完成后 resume 当前协程并返回结果。
+   */
   decltype(auto) operator co_await() & {
     return this->wait();
   }
@@ -360,6 +380,10 @@ struct co_task_with {
     promise.next = h;
   }
 
+  /**
+   * @brief 启动协程并返回一个关联的 future。
+   * @return task_future<T> 对象，可用于同步阻塞等待返回值（std::counting_semaphore）。
+   */
   task_future<T> get_future() & {
     task_future<T> future;
     [this](task_future<T> future)
@@ -429,6 +453,11 @@ struct call_mixin {
   }
 };
 
+/**
+ * @brief 可取消的函数包装器
+ * * 封装了“执行逻辑”和“取消逻辑”的函数对象。
+ * 用于提交给支持取消操作的 Executor。
+ */
 template <typename R, typename... Args>
 struct cancellable_function : public cancel_mixin, call_mixin<R, Args...> {
   using cancel_base = cancel_mixin;
@@ -465,6 +494,11 @@ struct execute_by_awaitable {
   void await_resume() const noexcept {}
 };
 
+/**
+ * @brief 切换执行上下文 (Awaitable Helper)
+ * * 用法: `co_await async::execute_by(executor);`
+ * * 行为: 挂起当前协程，将 resume 动作打包提交给目标 executor, 实现线程/上下文切换。
+ */
 template <typename Executor>
 auto execute_by(Executor& executor) {
   return execute_by_awaitable{executor};
@@ -477,6 +511,10 @@ struct trivial_executor_t {
   }
 };
 
+/**
+ * @brief 全局默认的简易执行器实例
+ * * 行为: 对每个提交的任务启动一个 `std::thread` 并 detach，无线程池管理。
+ */
 constexpr trivial_executor_t trivial_executor{};
 
 struct async_call_t {
@@ -514,6 +552,11 @@ struct async_call_t {
   }
 };
 
+/**
+ * @brief 异步调用工具实例
+ * * 用法: `co_await async::async_call(func, executor);`
+ * * 行为: 将普通的可调用对象 func 包装为协程, 由 executor 异步执行.
+ */
 constexpr async_call_t async_call{};
 
 };  // namespace async
