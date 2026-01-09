@@ -921,14 +921,14 @@ void try_await() {
 
   guarded_thread writer1{std::thread{[&]() {
     for (size_t i = 0; i < 50; i++) {
-      [&]() -> co_task { co_await writer(1); }().start();
+      [&]() -> co_task { co_await writer(1); }().detach();
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
   }}};
 
   guarded_thread writer2{std::thread{[&]() {
     for (size_t i = 0; i < 200; i++) {
-      [&]() -> co_task { co_await writer(0.25); }().start();
+      [&]() -> co_task { co_await writer(0.25); }().detach();
       std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
   }}};
@@ -943,7 +943,7 @@ void try_await() {
                                   [&](double value) { sum += value; }, [&](auto& value) {}},
                      msg.data);
         }
-      }().start();
+      }().detach();
     }
   })();
   std::cout << t << std::endl;
@@ -1081,10 +1081,10 @@ void try_await2() {
       }
     }
     std::cout << std::endl;
-  }(resp).start();
+  }(resp).detach();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-  task.join();
+  task.wait();
 }
 
 void try_await3() {
@@ -1113,10 +1113,10 @@ void try_await3() {
       }
     }
     std::cout << std::endl;
-  }(resp).start();
+  }(resp).detach();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-  task.join();
+  task.wait();
 }
 
 void try_await4() {
@@ -1143,10 +1143,10 @@ void try_await4() {
       }
     }
     std::cout << std::endl;
-  }(resp, executor).start();
+  }(resp, executor).detach();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-  task.join();
+  task.wait();
 }
 
 void try_await5() {
@@ -1173,10 +1173,10 @@ void try_await5() {
       }
     }
     std::cout << std::endl;
-  }(resp, executor).start();
+  }(resp, executor).detach();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-  // task.join();
+  // task.wait();
   // 提前结束, 析构 executor 和 resp (RAII 管理 IO runner), 测试是否能正确 destroy 等待 resume
   // 的协程.
 }

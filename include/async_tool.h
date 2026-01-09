@@ -247,9 +247,15 @@ template <typename T>
 concept cancellable = requires(T obj) { obj.cancel(); };
 
 struct done_mixin {
-  std::shared_ptr<std::binary_semaphore> done = std::make_shared<std::binary_semaphore>(0);
+  std::shared_ptr<std::binary_semaphore> done{nullptr};
   void _return() const {
-    done->release();
+    if (done) {
+      done->release();
+    }
+  }
+  std::shared_ptr<std::binary_semaphore> get_done() {
+    done = std::make_shared<std::binary_semaphore>(0);
+    return done;
   }
 };
 
@@ -295,6 +301,15 @@ struct task_future {
   }
 };
 
+struct task_done {
+  std::shared_ptr<std::binary_semaphore> semaphore;
+  void wait() const {
+    if (semaphore) {
+      semaphore->acquire();
+    }
+  }
+};
+
 template <typename T = void>
 struct co_task_with {
   struct final_awaitable {
@@ -312,7 +327,6 @@ struct co_task_with {
     std::coroutine_handle<> next{nullptr};
     auto get_return_object() {
       return co_task_with{.co_handle = std::coroutine_handle<promise_type>::from_promise(*this),
-                          .done = this->done,
                           .promise = *this};
     }
     auto initial_suspend() {
@@ -324,14 +338,14 @@ struct co_task_with {
     void unhandled_exception() {}
   };
 
-  co_task_with& start() & {
+  task_done detach() & {
+    auto _done = promise.get_done();
     co_handle.resume();
-    return *this;
+    return task_done{_done};
   }
 
-  co_task_with start() && {
-    co_handle.resume();
-    return std::move(*this);
+  task_done detach() && {
+    return this->detach();
   }
 
   co_task_awaitable<T> wait() & {
@@ -340,10 +354,6 @@ struct co_task_with {
 
   decltype(auto) operator co_await() & {
     return this->wait();
-  }
-
-  void join() const {
-    done->acquire();
   }
 
   void hook_next(std::coroutine_handle<> h) noexcept {
@@ -366,7 +376,7 @@ struct co_task_with {
         future.state_ptr->retval.e_ptr = std::current_exception();
         future.state_ptr->done.release();
       }
-    }(future).start();
+    }(future).detach();
     return future;
   }
 
@@ -375,7 +385,6 @@ struct co_task_with {
   }
 
   std::coroutine_handle<promise_type> co_handle;
-  std::shared_ptr<std::binary_semaphore> done;
   promise_type& promise;
 };
 
