@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <future>
 #include <initializer_list>
 #include <iostream>
 #include <locale>
@@ -920,14 +921,14 @@ void try_await() {
 
   guarded_thread writer1{std::thread{[&]() {
     for (size_t i = 0; i < 50; i++) {
-      [&]() -> co_task { co_await writer(1); }().launch();
+      [&]() -> co_task { co_await writer(1); }().start();
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
   }}};
 
   guarded_thread writer2{std::thread{[&]() {
     for (size_t i = 0; i < 200; i++) {
-      [&]() -> co_task { co_await writer(0.25); }().launch();
+      [&]() -> co_task { co_await writer(0.25); }().start();
       std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
   }}};
@@ -942,7 +943,7 @@ void try_await() {
                                   [&](double value) { sum += value; }, [&](auto& value) {}},
                      msg.data);
         }
-      }().launch();
+      }().start();
     }
   })();
   std::cout << t << std::endl;
@@ -1080,10 +1081,10 @@ void try_await2() {
       }
     }
     std::cout << std::endl;
-  }(resp).launch();
+  }(resp).start();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-  task.sync_wait();
+  task.join();
 }
 
 void try_await3() {
@@ -1103,7 +1104,7 @@ void try_await3() {
         co_return co_await resp.get_chunk(buffer);
       }(resp, msg_buffer);
 
-      auto chunk = co_await mini_task.wait();
+      auto chunk = co_await mini_task;
       if (chunk) {
         auto ch = std::get<std::string_view>(chunk.data);
         std::cout << ch << std::flush;
@@ -1112,10 +1113,10 @@ void try_await3() {
       }
     }
     std::cout << std::endl;
-  }(resp).launch();
+  }(resp).start();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-  task.sync_wait();
+  task.join();
 }
 
 void try_await4() {
@@ -1142,10 +1143,10 @@ void try_await4() {
       }
     }
     std::cout << std::endl;
-  }(resp, executor).launch();
+  }(resp, executor).start();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-  task.sync_wait();
+  task.join();
 }
 
 void try_await5() {
@@ -1172,12 +1173,42 @@ void try_await5() {
       }
     }
     std::cout << std::endl;
-  }(resp, executor).launch();
+  }(resp, executor).start();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-  // task.sync_wait();
+  // task.join();
   // 提前结束, 析构 executor 和 resp (RAII 管理 IO runner), 测试是否能正确 destroy 等待 resume
   // 的协程.
+}
+
+void try_await6() {
+  const int N = 100'000'000;
+  std::vector nums{std::from_range, std::views::iota(1, N + 1)};
+
+  auto task = [](std::vector<int>& nums) -> async::co_task_with<long long> {
+    constexpr int M = 5;
+    long long retval[M]{0};
+    auto worker = runner<std::function<void()>> {};
+
+    std::vector<async::task_future<long long>> subtasks;
+    subtasks.reserve(M);
+    for (int i = 0; i < M; i++) {
+      subtasks.emplace_back([&worker](std::vector<int> &nums) -> async::co_task_with<long long> {
+        co_await async::execute_by(worker); // worker is valid until suspend
+        co_return std::ranges::fold_left(nums, (long long)0, std::plus<long long>{});
+      }(nums).get_future());
+    }
+
+    co_await async::execute_by(async::trivial_executor);
+    long long result{0};
+    for (auto& subtask : subtasks) {
+      result += subtask.get();
+    }
+    co_return result;
+  }(nums).get_future();
+
+  std::cout << "Do something else here...\n" << std::flush;
+  std::cout << std::format("result = {}\n", task.get()) << std::flush;
 }
 
 }  // namespace playground

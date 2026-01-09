@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <semaphore>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -32,7 +33,7 @@ struct value_storage_base {
   }
 
   template <typename F>
-  void execute(F&& f) {
+  void execute(F&& f) noexcept {
     try {
       derived().execute_impl(std::forward<F>(f));
     } catch (...) {
@@ -198,7 +199,8 @@ struct to_execute_t {
   std::coroutine_handle<> h;
 
   void operator()() {
-    retval->execute([this]() { return (*op)(*stream, std::forward<data_t>(*data)); });
+    retval->execute(
+        [this]() -> decltype(auto) { return (*op)(*stream, std::forward<data_t>(*data)); });
     h.resume();
   }
 
@@ -276,6 +278,23 @@ using return_mixin =
 template <typename T>
 struct co_task_awaitable;
 
+template <typename T>
+struct task_future {
+  struct state {
+    std::binary_semaphore done{0};
+    [[no_unique_address]] value_storage<T> retval;
+  };
+  std::shared_ptr<state> state_ptr = std::make_shared<state>();
+
+  /**
+   仅保证第一次调用有效
+   */
+  decltype(auto) get() {
+    state_ptr->done.acquire();
+    return std::move(state_ptr->retval).get();
+  }
+};
+
 template <typename T = void>
 struct co_task_with {
   struct final_awaitable {
@@ -305,12 +324,12 @@ struct co_task_with {
     void unhandled_exception() {}
   };
 
-  co_task_with& launch() & {
+  co_task_with& start() & {
     co_handle.resume();
     return *this;
   }
 
-  co_task_with launch() && {
+  co_task_with start() && {
     co_handle.resume();
     return std::move(*this);
   }
@@ -319,12 +338,40 @@ struct co_task_with {
     return co_task_awaitable<T>{*this};
   }
 
-  void sync_wait() const {
+  decltype(auto) operator co_await() & {
+    return this->wait();
+  }
+
+  void join() const {
     done->acquire();
   }
 
   void hook_next(std::coroutine_handle<> h) noexcept {
     promise.next = h;
+  }
+
+  task_future<T> get_future() & {
+    task_future<T> future;
+    [this](task_future<T> future)
+        -> co_task_with<> {  // copy a future here, valid until coroutine frame destroyed.
+      try {
+        if constexpr (std::is_void_v<T>) {
+          co_await this->wait();  // this is valid until suspend
+          future.state_ptr->done.release();
+        } else {
+          future.state_ptr->retval.set(co_await this->wait());  // this is valid until suspend
+          future.state_ptr->done.release();
+        }
+      } catch (...) {
+        future.state_ptr->retval.e_ptr = std::current_exception();
+        future.state_ptr->done.release();
+      }
+    }(future).start();
+    return future;
+  }
+
+  task_future<T> get_future() && {
+    return this->get_future();
   }
 
   std::coroutine_handle<promise_type> co_handle;
@@ -336,6 +383,11 @@ template <typename T>
 struct co_task_awaitable {
   using task_t = co_task_with<T>;
   task_t& task;
+  task_t::promise_type& promise;
+  std::coroutine_handle<> task_co_handle;
+
+  co_task_awaitable(task_t& _task)
+      : task(_task), promise(_task.promise), task_co_handle(_task.co_handle) {}
 
   bool await_ready() const noexcept {
     return false;
@@ -344,9 +396,9 @@ struct co_task_awaitable {
     task.hook_next(h);
     return task.co_handle;  // transfer to run co_handle.resume();
   }
-  T await_resume() const noexcept {
-    value_storage<T> value{std::move(task.promise.retval)};
-    task.co_handle.destroy();
+  T await_resume() const noexcept { // task may be invalid here
+    value_storage<T> value{std::move(promise.retval)};
+    task_co_handle.destroy();
     return std::move(value).get();
   }
 };
@@ -398,7 +450,7 @@ struct execute_by_awaitable {
   bool await_ready() const noexcept {
     return false;
   }
-  void await_suspend(std::coroutine_handle<> h) noexcept {
+  void await_suspend(std::coroutine_handle<> h) {
     executor(cancellable_function<void>{[=]() { h.resume(); }, [=]() { h.destroy(); }});
   }
   void await_resume() const noexcept {}
@@ -408,5 +460,51 @@ template <typename Executor>
 auto execute_by(Executor& executor) {
   return execute_by_awaitable{executor};
 }
+
+struct trivial_executor_t {
+  void operator()(std::function<void()> f) const {
+    std::thread th{[f = std::move(f)]() { f(); }};
+    th.detach();
+  }
+};
+
+constexpr trivial_executor_t trivial_executor{};
+
+struct async_call_t {
+  template <std::invocable F, typename Executor>
+  struct awaitable {
+    F f;
+    Executor& executor;
+    using ret_t = std::invoke_result_t<F>;
+    [[no_unique_address]] value_storage<ret_t> retval;
+
+    bool await_ready() const noexcept {
+      return false;
+    }
+    void await_suspend(std::coroutine_handle<> h) {
+      executor(cancellable_function<void>(
+          [this, h, f = std::move(f)]() {
+            retval.execute([&]() -> decltype(auto) { return f(); });  // sync call
+            h.resume();
+          },
+          [h]() { h.destroy(); }));
+    }
+    ret_t await_resume() {
+      return std::move(retval).get();
+    }
+  };
+
+  template <std::invocable F, typename Executor>
+  auto operator()(F f, Executor& executor) const {
+    return awaitable<F, Executor>{.f = std::move(f), .executor = executor};
+  }
+
+  template <std::invocable F>
+  auto operator()(F f) const {
+    return awaitable<F, const trivial_executor_t>{.f = std::move(f), .executor = trivial_executor};
+  }
+};
+
+constexpr async_call_t async_call{};
 
 };  // namespace async

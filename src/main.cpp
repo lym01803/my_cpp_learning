@@ -24,5 +24,7 @@ int main() {
   playground::try_await3();
   playground::try_await4();
   playground::try_await5();
+  std::cout << std::endl;
+  playground::try_await6();
   return 0;
 }

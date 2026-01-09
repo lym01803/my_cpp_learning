@@ -482,4 +482,6 @@ void try_await4();
 
 void try_await5();
 
+void try_await6();
+
 }  // namespace playground
