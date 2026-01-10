@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <concepts>
 #include <coroutine>
 #include <exception>
@@ -198,7 +199,7 @@ class dispatcher {
    */
   template <typename U>
   awaitable operator()(U&& data) {
-    return awaitable{.stream = stream, .executor = executor, .data = std::forward<U>(data)};
+    return awaitable{.stream = stream, .executor = executor, .data = {std::forward<U>(data)}};
   }
 };
 
@@ -298,17 +299,41 @@ struct co_task_awaitable;
 template <typename T>
 struct task_future {
   struct state {
-    std::binary_semaphore done{0};
+    std::atomic<bool> _done{false};
     [[no_unique_address]] value_storage<T> retval;
+
+    void release() {
+      _done.store(true, std::memory_order_release);
+      _done.notify_all();
+    }
+
+    void acquire() {
+      bool old = _done.load(std::memory_order_acquire);
+      while (!old) {
+        _done.wait(old, std::memory_order_relaxed);
+        old = _done.load(std::memory_order_acquire);
+      }
+    }
+
+    bool done() {
+      return _done.load(std::memory_order_relaxed);
+    }
   };
   std::shared_ptr<state> state_ptr = std::make_shared<state>();
 
   /**
    * @brief 阻塞当前线程直到任务完成并获取结果, 仅保证第一次调用有效
    */
-  decltype(auto) wait() {
-    state_ptr->done.acquire();
+  decltype(auto) get() {
+    state_ptr->acquire();
     return std::move(state_ptr->retval).get();
+  }
+
+  /**
+   * @brief 获取任务是否完成, 用于决定是否要阻塞获取结果.
+   */
+  bool done() const {
+    return state_ptr->done();
   }
 };
 
@@ -391,14 +416,14 @@ struct co_task_with {
       try {
         if constexpr (std::is_void_v<T>) {
           co_await this->wait();  // this is valid until suspend
-          future.state_ptr->done.release();
+          future.state_ptr->release();
         } else {
           future.state_ptr->retval.set(co_await this->wait());  // this is valid until suspend
-          future.state_ptr->done.release();
+          future.state_ptr->release();
         }
       } catch (...) {
         future.state_ptr->retval.e_ptr = std::current_exception();
-        future.state_ptr->done.release();
+        future.state_ptr->release();
       }
     }(future).detach();
     return future;

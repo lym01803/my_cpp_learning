@@ -1085,7 +1085,7 @@ void try_await2() {
   }(resp).get_future();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-  task.wait();
+  task.get();
   std::future<int> x;
 }
 
@@ -1118,7 +1118,7 @@ void try_await3() {
   }(resp).get_future();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-  task.wait();
+  task.get();
 }
 
 void try_await4() {
@@ -1148,7 +1148,7 @@ void try_await4() {
   }(resp, executor).get_future();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-  task.wait();
+  task.get();
 }
 
 void try_await5() {
@@ -1203,13 +1203,17 @@ void try_await6() {
     co_await async::execute_by(async::trivial_executor);
     long long result{0};
     for (auto& subtask : subtasks) {
-      result += subtask.wait();
+      result += subtask.get();
     }
     co_return result;
   }(nums).get_future();
 
   std::cout << "Do something else here...\n" << std::flush;
-  std::cout << std::format("result = {}\n", task.wait()) << std::flush;
+  std::cout << std::format("result = {}\n", task.get()) << std::flush;
+}
+
+void try_await7() {
+
 }
 
 }  // namespace playground
