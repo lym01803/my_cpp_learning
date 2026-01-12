@@ -26,5 +26,6 @@ int main() {
   playground::try_await5();
   std::cout << std::endl;
   playground::try_await6();
+  playground::try_await7();
   return 0;
 }

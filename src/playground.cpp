@@ -1194,10 +1194,10 @@ void try_await6() {
     std::vector<async::task_future<long long>> subtasks;
     subtasks.reserve(M);
     for (int i = 0; i < M; i++) {
-      subtasks.emplace_back([&worker](std::vector<int> &nums) -> async::co_task_with<long long> {
+      subtasks.emplace_back([](std::vector<int> &nums, auto& worker) -> async::co_task_with<long long> {
         co_await async::execute_by(worker); // worker is valid until suspend
         co_return std::ranges::fold_left(nums, (long long)0, std::plus<long long>{});
-      }(nums).get_future());
+      }(nums, worker).get_future());
     }
 
     co_await async::execute_by(async::trivial_executor);
@@ -1213,7 +1213,52 @@ void try_await6() {
 }
 
 void try_await7() {
+  auto scheduler = runner<async::cancellable_function<void>>{};
+  // perform f in an external executor, and switch back to scheduler
+  auto external = [&scheduler]<typename F>(F f) -> async::co_task_with<std::invoke_result_t<F>> {
+    auto& sched = scheduler;
+    using ret_t = std::invoke_result_t<F>;
+    if constexpr (std::is_void_v<ret_t>) {
+      co_await async::async_call(std::forward<F>(f), async::trivial_executor);
+      co_await async::execute_by(sched);
+      co_return;
+    } else {
+      async::value_storage<ret_t> value;
+      value.set(co_await async::async_call(std::forward<F>(f), async::trivial_executor));
+      co_await async::execute_by(sched);
+      co_return value.get();
+    }
+  };
 
+  auto task = [](auto& external, auto& scheduler) -> async::co_task {
+    auto sleep_task = [&external](int num_ms) -> async::co_task_with<void> {
+      auto mini_task = external([=]() {
+        std::cout << std::format("before sleep for {} ms, thread_id: {}\n", num_ms,
+                                 std::this_thread::get_id())
+                  << std::flush;
+        std::this_thread::sleep_for(std::chrono::milliseconds(num_ms));
+      });
+      co_await mini_task;
+      std::cout << std::format("after sleep for {} ms, thread_id: {}\n",
+                               num_ms, std::this_thread::get_id())
+                << std::flush;
+    };
+    sleep_task(3000).detach();
+    sleep_task(1000).detach();
+    sleep_task(5000).detach();
+
+    std::cout << std::format(
+                     "如果scheduler上的调用者不挂起自己, scheduler上其他任务的协程不会 "
+                     "resume\nbefore caller sleep for 2000 ms\n")
+              << std::flush;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    std::cout << "after caller sleep for 2000 ms, caller 挂起自己\n" << std::flush;
+    co_await async::execute_by(scheduler);
+    std::cout << std::format("scheduler switch back to caller\n") << std::flush;
+  }(external, scheduler);
+  scheduler([&]() { task.detach(); });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(8000));
 }
 
 }  // namespace playground
