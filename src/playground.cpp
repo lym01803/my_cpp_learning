@@ -1232,13 +1232,12 @@ void try_await7() {
 
   auto task = [](auto& external, auto& scheduler) -> async::co_task {
     auto sleep_task = [&external](int num_ms) -> async::co_task_with<void> {
-      auto mini_task = external([=]() {
+      co_await external([=]() {
         std::cout << std::format("before sleep for {} ms, thread_id: {}\n", num_ms,
                                  std::this_thread::get_id())
                   << std::flush;
         std::this_thread::sleep_for(std::chrono::milliseconds(num_ms));
       });
-      co_await mini_task;
       std::cout << std::format("after sleep for {} ms, thread_id: {}\n",
                                num_ms, std::this_thread::get_id())
                 << std::flush;

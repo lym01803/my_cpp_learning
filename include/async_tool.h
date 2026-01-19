@@ -393,11 +393,23 @@ struct co_task_with {
     return co_task_awaitable<T>{*this};
   }
 
+  co_task_awaitable<T> wait() && {
+    return co_task_awaitable<T>{*this};
+  }
+
   /**
    * @brief 协程等待, 支持直接 `co_await task;`。
    * * 行为: 等待执行器异步执行，任务完成后 resume 当前协程并返回结果。
    */
   decltype(auto) operator co_await() & {
+    return this->wait();
+  }
+
+  /**
+   * @brief 协程等待, 支持直接 `co_await task;`。
+   * * 行为: 等待执行器异步执行，任务完成后 resume 当前协程并返回结果。
+   */
+  decltype(auto) operator co_await() && {
     return this->wait();
   }
 
@@ -440,19 +452,18 @@ struct co_task_with {
 template <typename T>
 struct co_task_awaitable {
   using task_t = co_task_with<T>;
-  task_t& task;
   task_t::promise_type& promise;
   std::coroutine_handle<> task_co_handle;
 
   co_task_awaitable(task_t& _task)
-      : task(_task), promise(_task.promise), task_co_handle(_task.co_handle) {}
+      : promise(_task.promise), task_co_handle(_task.co_handle) {}
 
   bool await_ready() const noexcept {
     return false;
   }
   auto await_suspend(std::coroutine_handle<> h) const noexcept {
-    task.hook_next(h);
-    return task.co_handle;  // transfer to run co_handle.resume();
+    promise.next = h;
+    return task_co_handle;  // transfer to run co_handle.resume();
   }
   T await_resume() const noexcept { // task may be invalid here
     value_storage<T> value{std::move(promise.retval)};
