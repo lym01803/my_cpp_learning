@@ -337,6 +337,19 @@ struct task_future {
   }
 };
 
+struct next_awaitable {
+  std::coroutine_handle<>& next;
+  bool await_ready() const noexcept {
+    return !next;
+  }
+  auto await_suspend(std::coroutine_handle<> h) const noexcept {
+    auto _next = next;
+    next = nullptr;
+    return _next;
+  }
+  void await_resume() const noexcept {}
+};
+
 /**
  * @brief 通用协程任务 (Lazy 模式)
  * * * **设计模式**：Lazy Execution。协程创建后处于暂停状态，必须显式启动。
@@ -349,19 +362,17 @@ struct task_future {
  */
 template <typename T = void>
 struct co_task_with {
-  struct final_awaitable {
-    std::coroutine_handle<> next{nullptr};
-    bool await_ready() const noexcept {
-      return !next;
-    }
-    auto await_suspend(std::coroutine_handle<> h) const noexcept {
-      return next;
-    }
-    void await_resume() const noexcept {}
-  };
+  using final_awaitable = next_awaitable;
 
   struct promise_type : public return_mixin<T> {
     std::coroutine_handle<> next{nullptr};
+
+    ~promise_type() {
+      if (next) {
+        next.destroy();
+      }
+    }
+
     auto get_return_object() {
       return co_task_with{.co_handle = std::coroutine_handle<promise_type>::from_promise(*this),
                           .promise = *this};
@@ -473,6 +484,80 @@ struct co_task_awaitable {
 };
 
 using co_task = co_task_with<>;
+
+template <typename T>
+struct yield_task_awaitable;
+
+template <typename T>
+  requires (!std::is_void_v<T>)
+struct yield_task : protected co_task_with<T> {
+  using base = co_task_with<T>;
+  using yield_awaitable = next_awaitable;
+
+  struct promise_type : public base::promise_type {
+    bool returned{false};
+    yield_task get_return_object() {
+      return {base::promise_type::get_return_object(), *this};
+    }
+    auto yield_value(T value) {
+      this->retval.set(std::forward<T>(value));
+      return yield_awaitable{this->next};
+    }
+    void return_value(T value) {
+      returned = true;
+      base::promise_type::return_value(std::forward<T>(value));
+    }
+  };
+
+  yield_task(const base& _base, promise_type& _promise) : base{_base}, promise{_promise} {}
+
+  void cancel() {  // coroutine must be suspended when calling cancel
+    if (!returned && this->co_handle != nullptr) {
+      this->co_handle.destroy();
+      this->co_handle = nullptr;
+    }
+  }
+
+  auto wait() & {
+    return yield_task_awaitable<T>{*this};
+  }
+
+  decltype(auto) operator co_await() & {
+    return this->wait();
+  }
+
+  bool returned{false};
+  promise_type& promise;
+
+  friend yield_task_awaitable<T>;
+};
+
+template <typename T>
+struct yield_task_awaitable {
+  using task_t = yield_task<T>;
+  task_t::promise_type& promise;
+  std::coroutine_handle<> task_co_handle;
+  bool& returned;
+
+  yield_task_awaitable(task_t& _task)
+      : promise(_task.promise), task_co_handle(_task.co_handle), returned{_task.returned} {}
+
+  bool await_ready() const noexcept {
+    return false;
+  }
+  auto await_suspend(std::coroutine_handle<> h) const noexcept {
+    promise.next = h;
+    return task_co_handle;  // transfer to run co_handle.resume();
+  }
+  T await_resume() const noexcept {  // task must be valid here
+    value_storage<T> value{std::move(promise.retval)};
+    if (promise.returned) {  // task_co_handle is final suspended
+      returned = true;
+      task_co_handle.destroy();
+    }
+    return std::move(value).get();
+  }
+};
 
 struct cancel_mixin {
   std::function<void()> _cancel{[]() {}};

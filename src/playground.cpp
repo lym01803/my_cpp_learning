@@ -1260,4 +1260,31 @@ void try_await7() {
   std::this_thread::sleep_for(std::chrono::milliseconds(8000));
 }
 
+void try_await8() {
+  auto executor = runner<async::cancellable_function<void>>{};
+  auto main_scheduler = runner<async::cancellable_function<void>>{};
+
+  auto task = [](auto& executor, auto& scheduler) -> async::co_task {
+    const int N = 10;
+    
+    auto fib_gen = [](auto& executor, auto& scheduler, int a0, int a1) -> async::yield_task<int> {
+      while (true) {
+        co_yield a0;
+        co_await async::async_call([&]() {
+          a1 = a0 + a1;
+          a0 = a1 - a0;
+        }, executor);
+        co_await async::execute_by(scheduler);
+      }
+    }(executor, scheduler, 1, 1);
+    
+    for (int i = 0; i < N; i++) {
+      std::cout << (co_await fib_gen) << std::endl;
+    }
+    fib_gen.cancel();
+  }(executor, main_scheduler).get_future();
+
+  task.get();
+}
+
 }  // namespace playground
