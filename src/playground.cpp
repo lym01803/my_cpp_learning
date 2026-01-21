@@ -1386,19 +1386,33 @@ void try_await12() {
   auto executor = runner<async::cancellable_function<void>>{};
   auto main_scheduler = runner<async::cancellable_function<void>>{};
 
+  std::stop_source stop;
+  auto timer = [](auto& scheduler, std::stop_token token) -> async::co_task {
+    auto start_time = std::chrono::high_resolution_clock::now();
+    while (!token.stop_requested()) {
+      co_await async::lift([]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+      }).on(scheduler);
+      std::cout << std::format("time passed: {}",
+                               std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::high_resolution_clock::now() - start_time))
+                << std::endl;
+    }
+  }(main_scheduler, stop.get_token());
+  timer.detach();
+
   auto task = [](auto& executor, auto& scheduler) -> async::co_task {
     const int N = 10;
-
     auto fib_gen = [](auto& executor, int a0, int a1) -> async::yield_task<int> {
       while (true) {
         co_yield a0;
         co_await async::lift([&]() {
+          std::this_thread::sleep_for(std::chrono::milliseconds(500));
           a1 = a0 + a1;
           a0 = a1 - a0;
         }).on(executor);
       }
     }(executor, 1, 1);
-
     for (int i = 0; i < N; i++) {
       std::cout << (co_await async::lift(fib_gen).back_to(scheduler)) << std::endl;
     }
@@ -1406,6 +1420,7 @@ void try_await12() {
   }(executor, main_scheduler).get_future();
 
   task.get();
+  stop.request_stop();
 }
 
 }  // namespace playground
