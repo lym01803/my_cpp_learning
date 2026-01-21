@@ -580,7 +580,7 @@ struct call_mixin {
  * 用于提交给支持取消操作的 Executor。
  */
 template <typename R, typename... Args>
-struct cancellable_function : public cancel_mixin, call_mixin<R, Args...> {
+struct cancellable_function : public cancel_mixin, public call_mixin<R, Args...> {
   using cancel_base = cancel_mixin;
   using call_base = call_mixin<R, Args...>;
 
@@ -679,5 +679,238 @@ struct async_call_t {
  * * 行为: 将普通的可调用对象 func 包装为协程, 由 executor 异步执行.
  */
 constexpr async_call_t async_call{};
+
+template <typename A>
+concept awaiter = requires(A obj, std::coroutine_handle<> h) {
+  { obj.await_ready() } -> std::convertible_to<bool>;
+  obj.await_suspend(h);
+  obj.await_resume();
+};
+
+template <typename A>
+concept has_member_co_await_operator = requires(A obj) {
+  { std::forward<A>(obj).operator co_await() } -> awaiter;
+};
+
+template <typename A>
+struct member_co_await_operator_retval : public std::false_type {};
+
+template <has_member_co_await_operator A>
+struct member_co_await_operator_retval<A> {
+  using type = decltype(std::declval<A>().operator co_await());
+};
+
+template <typename A>
+concept has_global_co_await_operator = requires(A obj) {
+  { operator co_await(std::forward<A>(obj)) } -> awaiter;
+};
+
+template <typename A>
+struct global_co_await_operator_retval : public std::false_type {};
+
+template <has_global_co_await_operator A>
+struct global_co_await_operator_retval<A> {
+  using type = decltype(operator co_await(std::declval<A>()));
+};
+
+template <typename A>
+concept has_promise_type = requires() { typename A::promise_type; };
+
+template <typename A>
+concept co_awaitable =
+    has_member_co_await_operator<A> || has_global_co_await_operator<A> || awaiter<A>;
+
+template <co_awaitable A>
+struct co_awaitable_trait {
+  using awaitable_t =
+      std::conditional_t<has_member_co_await_operator<A>,
+                         typename member_co_await_operator_retval<A>::type,
+                         std::conditional_t<has_global_co_await_operator<A>,
+                                            typename global_co_await_operator_retval<A>::type, A>>;
+  using resume_t = decltype(std::declval<awaitable_t>().await_resume());
+};
+
+template <co_awaitable A>
+struct pre_schedule_trait {
+  using pre_t = std::conditional_t<has_promise_type<A>, A,
+                                   co_task_with<typename co_awaitable_trait<A>::resume_t>>;
+};
+
+template <co_awaitable A>
+struct post_schedule_trait {
+  using post_t = std::conditional_t<has_promise_type<A>, A,
+                                    co_task_with<typename co_awaitable_trait<A>::resume_t>>;
+};
+
+template <co_awaitable A>
+struct extended_awaitable_trait : public co_awaitable_trait<A>,
+                                  public pre_schedule_trait<A>,
+                                  public post_schedule_trait<A> {};
+
+template <co_awaitable A, typename Executor>
+struct pre_scheduled_awaitable;
+
+template <co_awaitable A, typename Executor>
+struct post_scheduled_awaitable;
+
+template <typename Derived>
+struct extended_base {
+  template <typename Executor>
+  decltype(auto) on(Executor&& executor) & {
+    return pre_scheduled_awaitable<Derived&, Executor>{derived(), std::forward<Executor>(executor)};
+  }
+
+  template <typename Executor>
+  decltype(auto) on(Executor&& executor) && {
+    return pre_scheduled_awaitable<Derived, Executor>{std::move(derived()),
+                                                      std::forward<Executor>(executor)};
+  }
+
+  template <typename Executor>
+  decltype(auto) back_to(Executor&& executor) & {
+    return post_scheduled_awaitable<Derived&, Executor>{derived(),
+                                                        std::forward<Executor>(executor)};
+  }
+
+  template <typename Executor>
+  decltype(auto) back_to(Executor&& executor) && {
+    return post_scheduled_awaitable<Derived, Executor>{std::move(derived()),
+                                                       std::forward<Executor>(executor)};
+  }
+
+  Derived& derived() {
+    return static_cast<Derived&>(*this);
+  }
+};
+
+struct get_co_await_obj_t {
+  template <typename A>
+    requires has_member_co_await_operator<A>
+  decltype(auto) operator()(A&& awaitable) const {
+    return std::forward<A>(awaitable).operator co_await();
+  }
+
+  template <typename A>
+    requires(!has_member_co_await_operator<A>) && has_global_co_await_operator<A>
+  decltype(auto) operator()(A&& awaitable) const {
+    return operator co_await(std::forward<A>(awaitable));
+  }
+
+  template <typename A>
+    requires(!has_member_co_await_operator<A>) && (!has_global_co_await_operator<A>) && awaiter<A>
+  decltype(auto) operator()(A&& awaitable) const {
+    return std::forward<A>(awaitable);
+  }
+};
+
+constexpr get_co_await_obj_t get_co_await_obj;
+
+template <co_awaitable A>
+struct extended_awaitable : public extended_base<extended_awaitable<A>> {
+  using base = extended_base<extended_awaitable<A>>;
+  using awaitable_t = A;
+
+  A awaitable;
+
+  extended_awaitable(A awaitable) : awaitable{std::forward<A>(awaitable)} {}
+
+  decltype(auto) operator co_await() & {
+    return get_co_await_obj(awaitable);
+  }
+
+  decltype(auto) operator co_await() && {
+    return get_co_await_obj(std::forward<A>(awaitable));
+  }
+};
+
+template <co_awaitable A>
+extended_awaitable<A> lift(A&& awaitable) {
+  return {std::forward<A>(awaitable)};
+}
+
+template <co_awaitable A, typename Executor>
+struct pre_scheduled_awaitable : public extended_base<pre_scheduled_awaitable<A, Executor>> {
+  using base = extended_base<pre_scheduled_awaitable<A, Executor>>;
+  using awaitable_t = A;
+  using task_t = extended_awaitable_trait<A>::pre_t;
+  
+  A awaitable;
+  Executor executor;
+
+  pre_scheduled_awaitable(A awaitable, Executor executor)
+      : awaitable{std::forward<A>(awaitable)}, executor{std::forward<Executor>(executor)} {}
+
+  decltype(auto) operator co_await() & {
+    return get_co_await_obj([](A& awaitble, Executor& executor) -> task_t {
+      co_await execute_by(executor);
+      co_return co_await awaitble;
+    }(awaitable, executor));
+  }
+
+  decltype(auto) operator co_await() && {
+    return get_co_await_obj([](A awaitable, Executor executor) -> task_t {
+      co_await execute_by(std::forward<Executor>(executor));
+      co_return co_await std::forward<A>(awaitable);
+    }(std::forward<A>(awaitable), std::forward<Executor>(executor)));
+  }
+};
+
+template <co_awaitable A, typename Executor>
+struct post_scheduled_awaitable : public extended_base<post_scheduled_awaitable<A, Executor>> {
+  using base = extended_base<post_scheduled_awaitable<A, Executor>>;
+  using awaitable_t = A;
+  using task_t = extended_awaitable_trait<A>::post_t;
+  using retval_t = typename co_awaitable_trait<A>::resume_t;
+  
+  A awaitable;
+  Executor executor;
+
+  post_scheduled_awaitable(A awaitable, Executor executor)
+      : awaitable{std::forward<A>(awaitable)}, executor{std::forward<Executor>(executor)} {}
+
+  decltype(auto) operator co_await() & {
+    return get_co_await_obj([](A& awaitble, Executor& executor) -> task_t {
+      value_storage<retval_t> value;
+      if constexpr (std::is_void_v<retval_t>) {
+        co_await awaitble;
+      } else {
+        value.set(co_await awaitble);
+      }
+      co_await execute_by(executor);
+      co_return std::move(value).get();
+    }(awaitable, executor));
+  }
+
+  decltype(auto) operator co_await() && {
+    return get_co_await_obj([](A awaitable, Executor executor) -> task_t {
+      value_storage<retval_t> value;
+      if constexpr (std::is_void_v<retval_t>) {
+        co_await std::forward<A>(awaitable);
+      } else {
+        value.set(co_await std::forward<A>(awaitable));
+      }
+      co_await execute_by(std::forward<Executor>(executor));
+      co_return std::move(value).get();
+    }(std::forward<A>(awaitable), std::forward<Executor>(executor)));
+  }
+};
+
+template <std::invocable F>
+struct _trivial_call_awaiter {
+  F f;
+  bool await_ready() const noexcept {  // 不挂起
+    return true;
+  }
+  void await_suspend(std::coroutine_handle<> h) {}
+  decltype(auto) await_resume() {
+    return std::forward<F>(f)();  // 保持左值/右值调用
+  }
+};
+
+template <std::invocable F>
+  requires(!co_awaitable<F>)
+extended_awaitable<_trivial_call_awaiter<F>> lift(F&& callable) {
+  return {{std::forward<F>(callable)}};
+}
 
 };  // namespace async

@@ -28,5 +28,9 @@ int main() {
   playground::try_await6();
   playground::try_await7();
   playground::try_await8();
+  playground::try_await9();
+  playground::try_await10();
+  playground::try_await11();
+  playground::try_await12();
   return 0;
 }

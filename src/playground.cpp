@@ -1287,4 +1287,125 @@ void try_await8() {
   task.get();
 }
 
+void try_await9() {
+  using namespace async;
+  auto server = toy_server{};
+  auto client = toy_client{};
+  using msg_t = toy_client::msg_t;
+  using response_t = toy_client::response_t;
+  auto resp = client.stream_request(server, 100);
+
+  auto executor = runner<cancellable_function<void>>{};
+
+  auto task = []<typename resp_t, typename executor_t>(resp_t& resp,
+                                                       executor_t& executor) -> co_task {
+    msg_t msg_buffer;
+    while (true) {
+      auto chunk = co_await lift(resp.get_chunk(msg_buffer)).back_to(executor);
+      if (chunk) {
+        auto ch = std::get<std::string_view>(chunk.data);
+        std::cout << ch << std::flush;
+      } else {
+        break;
+      }
+    }
+    std::cout << std::endl;
+  }(resp, executor).get_future();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+  task.get();
+}
+
+void try_await10() {
+  const int N = 100'000'000;
+  std::vector nums{std::from_range, std::views::iota(1, N + 1)};
+
+  auto task = [](std::vector<int>& nums) -> async::co_task_with<long long> {
+    constexpr int M = 5;
+    long long retval[M]{0};
+    auto worker = runner<std::function<void()>> {};
+
+    std::vector<async::task_future<long long>> subtasks;
+    subtasks.reserve(M);
+    for (int i = 0; i < M; i++) {
+      subtasks.emplace_back([](std::vector<int> &nums, auto& worker) -> async::co_task_with<long long> {
+        co_return co_await async::lift([&]() {
+          return std::ranges::fold_left(nums, (long long)0, std::plus<long long>{});
+        }).on(worker);
+      }(nums, worker).get_future());
+    }
+
+    co_return co_await async::lift([&]() {
+      long long result{0};
+      for (auto& subtask : subtasks) {
+        result += subtask.get();
+      }
+      return result;
+    }).on(async::trivial_executor);
+  }(nums).get_future();
+
+  std::cout << "Do something else here...\n" << std::flush;
+  std::cout << std::format("result = {}\n", task.get()) << std::flush;
+}
+
+void try_await11() {
+  auto scheduler = runner<async::cancellable_function<void>>{};
+
+  auto task = [](auto& scheduler) -> async::co_task {
+    auto sleep_task = [&scheduler](int num_ms) -> async::co_task_with<void> {
+      co_await async::lift([=]() {
+        std::cout << std::format("before sleep for {} ms, thread_id: {}\n", num_ms,
+                                 std::this_thread::get_id())
+                  << std::flush;
+        std::this_thread::sleep_for(std::chrono::milliseconds(num_ms));
+      }).on(async::trivial_executor)
+        .back_to(scheduler);  // scheduler is valid until suspend
+      std::cout << std::format("after sleep for {} ms, thread_id: {}\n",
+                               num_ms, std::this_thread::get_id())
+                << std::flush;
+    };
+    sleep_task(3000).detach();
+    sleep_task(1000).detach();
+    sleep_task(5000).detach();
+
+    std::cout << std::format(
+                     "如果scheduler上的调用者不挂起自己, scheduler上其他任务的协程不会 "
+                     "resume\nbefore caller sleep for 2000 ms\n")
+              << std::flush;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    std::cout << "after caller sleep for 2000 ms, caller 挂起自己\n" << std::flush;
+    co_await async::execute_by(scheduler);
+    std::cout << std::format("scheduler switch back to caller\n") << std::flush;
+  }(scheduler);
+  scheduler([&]() { task.detach(); });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(8000));
+}
+
+void try_await12() {
+  auto executor = runner<async::cancellable_function<void>>{};
+  auto main_scheduler = runner<async::cancellable_function<void>>{};
+
+  auto task = [](auto& executor, auto& scheduler) -> async::co_task {
+    const int N = 10;
+
+    auto fib_gen = [](auto& executor, int a0, int a1) -> async::yield_task<int> {
+      while (true) {
+        co_yield a0;
+        co_await async::lift([&]() {
+          a1 = a0 + a1;
+          a0 = a1 - a0;
+        }).on(executor);
+      }
+    }(executor, 1, 1);
+
+    for (int i = 0; i < N; i++) {
+      std::cout << (co_await async::lift(fib_gen).back_to(scheduler)) << std::endl;
+    }
+    fib_gen.cancel();
+  }(executor, main_scheduler).get_future();
+
+  task.get();
+}
+
 }  // namespace playground
