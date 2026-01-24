@@ -1423,4 +1423,116 @@ void try_await12() {
   stop.request_stop();
 }
 
+namespace {
+
+struct progress_bar {
+  int total{100};
+  int current{0};
+  std::string message;
+  
+  void update(int _current = -1, std::string _message = "") {
+    current = _current >= 0 ? _current : current + 1;
+    message = std::move(_message);
+  }
+
+  friend std::ostream& operator << (std::ostream& os, const progress_bar& obj) {
+    os << std::format("\033[2K\r[{} / {}], {}", obj.current, obj.total, obj.message);
+    return os;
+  }
+};
+
+class gui_t {
+ private:
+  runner<async::cancellable_function<void>> sched;
+  runner<async::cancellable_function<void>> timer{1};
+  std::stop_source stop;
+  progress_bar& bar;
+  async::task_future<void> task;
+
+ public:
+  gui_t(progress_bar& bar)
+      : bar{bar},
+        task{[](std::stop_token token, auto& sched, auto& timer, auto& bar) -> async::co_task {
+          auto output = async::lift([&]() { std::cout << bar << std::flush; }).on(sched);
+          auto sleep =
+              async::lift([]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));  // about 60 fps
+              }).on(timer);
+          while (!token.stop_requested()) {
+            co_await output;
+            co_await sleep;
+          }
+        }(stop.get_token(), sched, timer, bar).get_future()} {}
+  ~gui_t() {
+    stop.request_stop();
+    task.get();
+  }
+  auto& scheduler() {
+    return sched;
+  }
+};
+
+struct primes {
+ public:
+  using end_t = std::monostate;
+
+  template <typename Executor>
+  static auto less_than(int n, Executor&& executor) -> async::yield_task<std::variant<end_t, int>> {
+    std::vector<bool> is_prime(n, true);
+    std::vector<int> primes;
+    primes.reserve(n);
+    for (int i = 2; i < n; i++) {
+      if (is_prime[i]) {
+        co_yield i;
+        co_await async::execute_by(executor);
+        primes.emplace_back(i);
+      }
+      for (auto p : primes) {
+        if (i * p < n) {
+          is_prime[i * p] = false;
+          if (i % p == 0) {
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+    }
+    co_return end_t{};
+  }
+};
+
+} // namespace
+
+void try_await13() {
+  auto computer = runner<async::cancellable_function<void>>{1};  // cap = 2 ^ 1 = 2
+  const int N = 100'000'000;
+  progress_bar bar{N};
+  auto gui = gui_t(bar);
+  auto prime_gen = primes::less_than(N, computer);
+
+  auto prime_count = [](auto& prime_gen, auto& gui, auto& bar) -> async::co_task_with<int> {
+    int count = 0;
+    while (true) {
+      auto item = co_await prime_gen;
+      if (std::holds_alternative<primes::end_t>(item)) {
+        break;
+      }
+      count++;
+      auto prime = std::get<int>(item);
+      co_await async::lift([&]() {
+        bar.update(prime, std::format("count: {}", count));
+      }).on(gui.scheduler());
+    }
+    co_return count;
+  }(prime_gen, gui, bar).get_future();
+
+  [](int count, int N, auto& scheduler) -> async::co_task {
+    co_await async::lift([&]() {
+      std::cout << std::endl
+                << std::format("There are {} prime numbers less than {}.", count, N) << std::endl;
+    }).on(scheduler);
+  }(prime_count.get(), N, gui.scheduler()).get_future().get();
+}
+
 }  // namespace playground

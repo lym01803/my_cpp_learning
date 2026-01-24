@@ -32,5 +32,6 @@ int main() {
   playground::try_await10();
   playground::try_await11();
   playground::try_await12();
+  playground::try_await13();
   return 0;
 }
