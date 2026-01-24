@@ -720,13 +720,31 @@ template <typename A>
 concept co_awaitable =
     has_member_co_await_operator<A> || has_global_co_await_operator<A> || awaiter<A>;
 
+struct get_co_await_obj_t {
+  template <typename A>
+    requires has_member_co_await_operator<A>
+  decltype(auto) operator()(A&& awaitable) const {
+    return std::forward<A>(awaitable).operator co_await();
+  }
+
+  template <typename A>
+    requires(!has_member_co_await_operator<A>) && has_global_co_await_operator<A>
+  decltype(auto) operator()(A&& awaitable) const {
+    return operator co_await(std::forward<A>(awaitable));
+  }
+
+  template <typename A>
+    requires(!has_member_co_await_operator<A>) && (!has_global_co_await_operator<A>) && awaiter<A>
+  decltype(auto) operator()(A&& awaitable) const {
+    return std::forward<A>(awaitable);
+  }
+};
+
+constexpr get_co_await_obj_t get_co_await_obj;
+
 template <co_awaitable A>
 struct co_awaitable_trait {
-  using awaitable_t =
-      std::conditional_t<has_member_co_await_operator<A>,
-                         typename member_co_await_operator_retval<A>::type,
-                         std::conditional_t<has_global_co_await_operator<A>,
-                                            typename global_co_await_operator_retval<A>::type, A>>;
+  using awaitable_t = decltype(get_co_await_obj(std::declval<A>()));
   using resume_t = decltype(std::declval<awaitable_t>().await_resume());
 };
 
@@ -747,10 +765,13 @@ struct extended_awaitable_trait : public co_awaitable_trait<A>,
                                   public pre_schedule_trait<A>,
                                   public post_schedule_trait<A> {};
 
-template <co_awaitable A, typename Executor>
+template <typename A>
+concept wrappable_awaitable = co_awaitable<A&> || co_awaitable<A&&>;
+
+template <wrappable_awaitable A, typename Executor>
 struct pre_scheduled_awaitable;
 
-template <co_awaitable A, typename Executor>
+template <wrappable_awaitable A, typename Executor>
 struct post_scheduled_awaitable;
 
 template <typename Derived>
@@ -783,29 +804,7 @@ struct extended_base {
   }
 };
 
-struct get_co_await_obj_t {
-  template <typename A>
-    requires has_member_co_await_operator<A>
-  decltype(auto) operator()(A&& awaitable) const {
-    return std::forward<A>(awaitable).operator co_await();
-  }
-
-  template <typename A>
-    requires(!has_member_co_await_operator<A>) && has_global_co_await_operator<A>
-  decltype(auto) operator()(A&& awaitable) const {
-    return operator co_await(std::forward<A>(awaitable));
-  }
-
-  template <typename A>
-    requires(!has_member_co_await_operator<A>) && (!has_global_co_await_operator<A>) && awaiter<A>
-  decltype(auto) operator()(A&& awaitable) const {
-    return std::forward<A>(awaitable);
-  }
-};
-
-constexpr get_co_await_obj_t get_co_await_obj;
-
-template <co_awaitable A>
+template <wrappable_awaitable A>
 struct extended_awaitable : public extended_base<extended_awaitable<A>> {
   using base = extended_base<extended_awaitable<A>>;
   using awaitable_t = A;
@@ -814,25 +813,28 @@ struct extended_awaitable : public extended_base<extended_awaitable<A>> {
 
   extended_awaitable(A awaitable) : awaitable{std::forward<A>(awaitable)} {}
 
-  decltype(auto) operator co_await() & {
+  decltype(auto) operator co_await() &
+    requires co_awaitable<A&>
+  {
     return get_co_await_obj(awaitable);
   }
 
-  decltype(auto) operator co_await() && {
+  decltype(auto) operator co_await() &&
+    requires co_awaitable<A&&>
+  {
     return get_co_await_obj(std::forward<A>(awaitable));
   }
 };
 
-template <co_awaitable A>
+template <wrappable_awaitable A>
 extended_awaitable<A> lift(A&& awaitable) {
   return {std::forward<A>(awaitable)};
 }
 
-template <co_awaitable A, typename Executor>
+template <wrappable_awaitable A, typename Executor>
 struct pre_scheduled_awaitable : public extended_base<pre_scheduled_awaitable<A, Executor>> {
   using base = extended_base<pre_scheduled_awaitable<A, Executor>>;
   using awaitable_t = A;
-  using task_t = extended_awaitable_trait<A>::pre_t;
   
   A awaitable;
   Executor executor;
@@ -841,25 +843,26 @@ struct pre_scheduled_awaitable : public extended_base<pre_scheduled_awaitable<A,
       : awaitable{std::forward<A>(awaitable)}, executor{std::forward<Executor>(executor)} {}
 
   decltype(auto) operator co_await() & {
-    return get_co_await_obj([](A& awaitble, Executor& executor) -> task_t {
-      co_await execute_by(executor);
-      co_return co_await awaitble;
-    }(awaitable, executor));
+    return get_co_await_obj(
+        [](A& awaitble, Executor& executor) -> extended_awaitable_trait<A&>::pre_t {
+          co_await execute_by(executor);
+          co_return co_await awaitble;
+        }(awaitable, executor));
   }
 
   decltype(auto) operator co_await() && {
-    return get_co_await_obj([](A awaitable, Executor executor) -> task_t {
-      co_await execute_by(std::forward<Executor>(executor));
-      co_return co_await std::forward<A>(awaitable);
-    }(std::forward<A>(awaitable), std::forward<Executor>(executor)));
+    return get_co_await_obj(
+        [](A awaitable, Executor executor) -> extended_awaitable_trait<A&&>::pre_t {
+          co_await execute_by(std::forward<Executor>(executor));
+          co_return co_await std::forward<A>(awaitable);
+        }(std::forward<A>(awaitable), std::forward<Executor>(executor)));
   }
 };
 
-template <co_awaitable A, typename Executor>
+template <wrappable_awaitable A, typename Executor>
 struct post_scheduled_awaitable : public extended_base<post_scheduled_awaitable<A, Executor>> {
   using base = extended_base<post_scheduled_awaitable<A, Executor>>;
   using awaitable_t = A;
-  using task_t = extended_awaitable_trait<A>::post_t;
   using retval_t = typename co_awaitable_trait<A>::resume_t;
   
   A awaitable;
@@ -869,29 +872,31 @@ struct post_scheduled_awaitable : public extended_base<post_scheduled_awaitable<
       : awaitable{std::forward<A>(awaitable)}, executor{std::forward<Executor>(executor)} {}
 
   decltype(auto) operator co_await() & {
-    return get_co_await_obj([](A& awaitble, Executor& executor) -> task_t {
-      value_storage<retval_t> value;
-      if constexpr (std::is_void_v<retval_t>) {
-        co_await awaitble;
-      } else {
-        value.set(co_await awaitble);
-      }
-      co_await execute_by(executor);
-      co_return std::move(value).get();
-    }(awaitable, executor));
+    return get_co_await_obj(
+        [](A& awaitble, Executor& executor) -> extended_awaitable_trait<A&>::post_t {
+          value_storage<retval_t> value;
+          if constexpr (std::is_void_v<retval_t>) {
+            co_await awaitble;
+          } else {
+            value.set(co_await awaitble);
+          }
+          co_await execute_by(executor);
+          co_return std::move(value).get();
+        }(awaitable, executor));
   }
 
   decltype(auto) operator co_await() && {
-    return get_co_await_obj([](A awaitable, Executor executor) -> task_t {
-      value_storage<retval_t> value;
-      if constexpr (std::is_void_v<retval_t>) {
-        co_await std::forward<A>(awaitable);
-      } else {
-        value.set(co_await std::forward<A>(awaitable));
-      }
-      co_await execute_by(std::forward<Executor>(executor));
-      co_return std::move(value).get();
-    }(std::forward<A>(awaitable), std::forward<Executor>(executor)));
+    return get_co_await_obj(
+        [](A awaitable, Executor executor) -> extended_awaitable_trait<A&&>::post_t {
+          value_storage<retval_t> value;
+          if constexpr (std::is_void_v<retval_t>) {
+            co_await std::forward<A>(awaitable);
+          } else {
+            value.set(co_await std::forward<A>(awaitable));
+          }
+          co_await execute_by(std::forward<Executor>(executor));
+          co_return std::move(value).get();
+        }(std::forward<A>(awaitable), std::forward<Executor>(executor)));
   }
 };
 
