@@ -1504,6 +1504,14 @@ struct primes {
 
 } // namespace
 
+/**
+ * @brief 异步协程演示：后台计算与 UI 渲染的解耦与线程切换。
+ * 
+ * 该 Demo 展示了如何利用 C++20 协程实现生产者-消费者模式：
+ * 1. 计算密集型任务（质数筛选）在后台线程执行，避免阻塞调用者。
+ * 2. 进度更新通过协程自动切换执行上下文（线程跳转）到 GUI 调度器进行安全渲染。
+ * 3. 演示了异步生成器（co_yield）与异步任务（co_await）的无缝集成。
+ */
 void try_await13() {
   auto computer = runner<async::cancellable_function<void>>{1};  // cap = 2 ^ 1 = 2
   const int N = 100'000'000;
