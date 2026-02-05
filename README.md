@@ -27,7 +27,7 @@
 ## 运行时工具 (`include/playground.h`)
 
 *   **`runner`**: 调度器/执行器实现。它封装了一个 `fix_cap_queue` 任务队列和一条专用线程，负责驱动协程状态机的 Resume 动作，是 `async_tool` 运行的引擎。
-*   **`sync_stream`**: 同步消息流。它结合了队列与 `stopable_cv`（可停止的条件变量），提供阻塞式的 `read_sync` 和 `write_sync` 接口，是 Demo 中线程间通信的主要通道。
+*   **`sync_stream`**: 同步消息流。它结合了队列与 `stoppable_cv`（可停止的条件变量），提供阻塞式的 `read_sync` 和 `write_sync` 接口，是 Demo 中线程间通信的主要通道。
 
 ## 实验演示 (`src/playground.cpp`)
 

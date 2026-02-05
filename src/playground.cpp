@@ -1,4 +1,5 @@
 #include <playground.h>
+#include <concurrency_utils.h>
 
 #include <algorithm>
 #include <atomic>
@@ -233,7 +234,7 @@ void try_condition_variable_with_stop() {  // NOLINT(readability-function-cognit
   std::vector data{std::from_range, std::views::iota(1LL, N + 1LL)};
   std::queue<long long> queue;
   std::mutex mutex;
-  stopable_cv cv;
+  stoppable_cv cv;
 
   auto fetch_and_output = [](auto& queue) {
     while (!queue.empty()) {
@@ -247,7 +248,7 @@ void try_condition_variable_with_stop() {  // NOLINT(readability-function-cognit
   guarded_thread reader{std::thread{[&]() {
     std::unique_lock lock{mutex};
     while (true) {
-      cv->wait(lock, [&]() { return !queue.empty() || cv.is_stoped(); });
+      cv->wait(lock, [&]() { return !queue.empty() || cv.is_stopped(); });
       if (!queue.empty()) {
         fetch_and_output(queue);
       } else {
@@ -628,7 +629,7 @@ struct mutex_queue_test {
   const size_t num{1'000'000};
   queue_t queue{cap};
 
-  void product(std::shared_ptr<counter_controller> counter, std::mutex& mutex, stopable_cv& cv) {
+  void product(std::shared_ptr<counter_controller> counter, std::mutex& mutex, stoppable_cv& cv) {
     counter_controller::guard counter_gd{*counter};
     for (size_t i = 0; i < num; i++) {
       std::unique_lock lock{mutex};
@@ -643,11 +644,11 @@ struct mutex_queue_test {
     }
   }
 
-  size_t consume(std::mutex& mutex, stopable_cv& cv) {
+  size_t consume(std::mutex& mutex, stoppable_cv& cv) {
     size_t sum = 0;
     while (true) {
       std::unique_lock lock{mutex};
-      cv->wait(lock, [&]() { return !queue.empty() || cv.is_stoped(); });
+      cv->wait(lock, [&]() { return !queue.empty() || cv.is_stopped(); });
       if (!queue.empty()) {
         auto data = queue.pop();
         lock.unlock();
@@ -682,7 +683,7 @@ struct mutex_queue_test {
   /** @warning do not run test_concurrent concurrently */
   void test_concurrent(size_t num_producer = 1, size_t num_consumer = 1) {
     std::mutex mutex;
-    stopable_cv cv;
+    stoppable_cv cv;
     auto counter = std::make_shared<counter_controller>((size_t)0, [&]() { cv.stop(); });
 
     tagged_timer_wrap("[concurrent total]", [&]() {
@@ -713,7 +714,7 @@ struct mutex_queue_test {
     }
 
     std::mutex mutex;
-    stopable_cv cv;
+    stoppable_cv cv;
     auto counter = std::make_shared<counter_controller>((size_t)0, [&]() { cv.stop(); });
 
     tagged_timer_wrap("[concurrent total]", [&]() {
