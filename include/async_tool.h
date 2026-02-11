@@ -972,7 +972,7 @@ struct all_t {
     requires std::ranges::sized_range<Range>
   struct range_awaiter {
     using iter_t = std::ranges::iterator_t<Range>;
-    using awaitable_t = std::ranges::range_value_t<Range>;
+    using awaitable_t = decltype(*std::declval<iter_t>());
     using retval_t = co_awaitable_trait<awaitable_t>::resume_t;
 
     Range awaiters;
