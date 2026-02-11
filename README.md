@@ -12,6 +12,9 @@
     *   `co_await`: 协程间的逻辑组合。
 *   **`lift`**: 一个强大的包装器，用于将普通的函数、Awaitable 转换为具备“上下文感知”的任务。
     *   用法示例：`co_await lift(task).on(executor)` 将任务切到指定线程执行；使用 `.back_to(executor)` 在执行完后自动切回。
+*   **`all`**: 实现类似 `Promise.all` 的功能，支持并行等待多个任务。
+    *   支持变长参数：`co_await all(task1, task2, ...)`，返回包含结果的 `std::tuple`。
+    *   支持 Range/Container：`co_await all(std::from_range, task_range)`，返回包含结果的 `std::vector`。
 *   **对称转移 (Symmetric Transfer)**: 内部完全采用对称转移机制，确保了深度协程调用链下的栈安全性与高性能。
 
 ### `message.h`

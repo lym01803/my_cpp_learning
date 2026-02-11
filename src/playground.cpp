@@ -1544,4 +1544,33 @@ void try_await13() {
   }(prime_count.get(), N, gui.scheduler()).get_future().get();
 }
 
+void try_await14() {
+  auto sleep_for = [](int ms) {
+    return async::lift([=]() {
+             std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+             return ms;
+           }).on(async::trivial_executor);
+  };
+
+  auto sleep_task = [](auto& sleep_for) -> async::co_task {
+    auto results = co_await async::all(
+        std::from_range, std::vector<int>{250, 1000, 500, 750} | std::views::transform(sleep_for));
+    for (auto& result : results) {
+      std::cout << std::format("sleep for {} ms; ", result.get());
+    }
+    std::cout << std::endl;
+  }(sleep_for);
+
+  [](auto& sleep_task) -> async::co_task {
+    auto results = co_await async::all(
+      sleep_task,
+      async::lift([]() {
+        std::cout << "Hello, world!" << std::endl; 
+        return "Finished saying hello."; 
+      }).on(async::trivial_executor)
+    );
+    std::cout << std::get<1>(results).get() << std::endl;
+  }(sleep_task).get_future().get();
+}
+
 }  // namespace playground
