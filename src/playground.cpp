@@ -1282,7 +1282,7 @@ void try_await8() {
     for (int i = 0; i < N; i++) {
       std::cout << (co_await fib_gen) << std::endl;
     }
-    fib_gen.cancel();
+    // fib_gen.cancel();
   }(executor, main_scheduler).get_future();
 
   task.get();
@@ -1417,7 +1417,7 @@ void try_await12() {
     for (int i = 0; i < N; i++) {
       std::cout << (co_await async::lift(fib_gen).back_to(scheduler)) << std::endl;
     }
-    fib_gen.cancel();
+    // fib_gen.cancel();
   }(executor, main_scheduler).get_future();
 
   task.get();
@@ -1552,7 +1552,7 @@ void try_await14() {
            }).on(async::trivial_executor);
   };
 
-  auto sleep_task = [](auto& sleep_for) -> async::co_task {
+  auto sleep_task = [](decltype(sleep_for)& sleep_for) -> async::co_task {
     auto results = co_await async::all(
         std::from_range, std::vector<int>{250, 1000, 500, 750} | std::views::transform(sleep_for));
     for (auto& result : results) {
@@ -1561,7 +1561,7 @@ void try_await14() {
     std::cout << std::endl;
   }(sleep_for);
 
-  [](auto& sleep_task) -> async::co_task {
+  [](decltype(sleep_task)& sleep_task) -> async::co_task {
     auto results = co_await async::all(
       sleep_task,
       async::lift([]() {
