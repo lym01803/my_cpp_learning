@@ -658,7 +658,7 @@ struct cancellable_function_ {
     F _func;
     C _cancel;
     derived_with_cancel(F&& func, C&& cancel)
-        : _func(std::move(func)), _cancel(std::move(cancel)) {}
+        : _func(std::forward<F>(func)), _cancel(std::forward<C>(cancel)) {}
     R operator()(Args ...args) override {
       return std::invoke(_func, std::forward<Args>(args)...);
     }
@@ -671,7 +671,7 @@ struct cancellable_function_ {
     requires std::convertible_to<std::invoke_result_t<F, Args...>, R>
   struct derived_without_cancel : public base {
     F _func;
-    derived_without_cancel(F&& func) : _func(std::move(func)) {}
+    derived_without_cancel(F&& func) : _func(std::forward<F>(func)) {}
     R operator()(Args ...args) override {
       return std::invoke(_func, std::forward<Args>(args)...);
     }
@@ -682,7 +682,7 @@ struct cancellable_function_ {
     requires std::convertible_to<std::invoke_result_t<F, Args...>, R> && cancellable<F>
   struct derived_cancellable : public base {
     F _func;
-    derived_cancellable(F&& func) : _func(std::move(func)) {}
+    derived_cancellable(F&& func) : _func(std::forward<F>(func)) {}
     R operator()(Args ...args) override {
       return std::invoke(_func, std::forward<Args>(args)...);
     }
