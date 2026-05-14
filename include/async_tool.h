@@ -463,7 +463,9 @@ struct co_task_with {
     auto final_suspend() noexcept {
       return final_awaitable{next};
     }
-    void unhandled_exception() {}
+    void unhandled_exception() {
+      this->retval.e_ptr = std::current_exception();
+    }
   };
 
   /**
