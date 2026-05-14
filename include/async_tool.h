@@ -145,6 +145,53 @@ struct value_storage<T> : public value_storage_base<value_storage<T>> {
   }
 };
 
+struct guarded_co_handle {
+  std::coroutine_handle<> h;
+
+ public:
+  guarded_co_handle() noexcept = default;
+  guarded_co_handle(nullptr_t) noexcept {}
+
+  template <typename PromiseT>
+  guarded_co_handle(std::coroutine_handle<PromiseT> h) noexcept : h{h} {}
+
+  ~guarded_co_handle() {
+    if (h) {
+      h.destroy();
+    }
+  }
+
+  guarded_co_handle(guarded_co_handle&& other) noexcept : h{other.h} {
+    other.h = nullptr;
+  }
+
+  guarded_co_handle& operator=(guarded_co_handle&& other) noexcept {
+    if (this == std::addressof(other)) {
+      return *this;
+    }
+    if (h) {
+      h.destroy();
+    }
+    h = other.h;
+    other.h = nullptr;
+    return *this;
+  }
+
+  std::coroutine_handle<> release() noexcept {
+    const auto temp_h = h;
+    h = nullptr;
+    return temp_h;
+  }
+
+  std::coroutine_handle<> get() const noexcept {
+    return h;
+  }
+
+  operator bool() const noexcept {
+    return (bool)h;
+  }
+};
+
 /**
  * @brief Concept: 约束 Op 是否可以作用于 Stream 和 T
  */
@@ -233,18 +280,12 @@ struct to_execute_t {
   using storage_t = value_storage<retval_t>;
 
   storage_t* retval;
-  std::coroutine_handle<> h;
+  guarded_co_handle h;
 
   void operator()() {
     retval->execute(
         [this]() -> decltype(auto) { return (*op)(*stream, std::forward<data_t>(*data)); });
-    h.resume();
-  }
-
-  void cancel() {
-    if (h) {
-      h.destroy();
-    }
+    h.release().resume();
   }
 };
 
@@ -266,7 +307,8 @@ struct dispatcher<T, Op, Stream, Executor>::awaitable {
   }
 
   void await_suspend(std::coroutine_handle<> h) {
-    executor(_to_execute_t{.op = &op, .stream = &stream, .data = &data, .retval = &retval, .h = h});
+    executor(_to_execute_t{
+        .op = &op, .stream = &stream, .data = &data, .retval = &retval, .h = guarded_co_handle{h}});
   }
 
   retval_t await_resume() {
@@ -281,7 +323,14 @@ template <typename T, ostream_with<T> Stream, typename Executor>
 using write_dispatcher = dispatcher<T, write_stream, Stream, Executor>;
 
 template <typename T>
-concept cancellable = requires(T obj) { obj.cancel(); };
+concept with_cancel = requires(T obj) { obj.cancel(); };
+
+/** 
+ * @deprecated 应该使用 with_cancel; 
+ * 现在 cancellable_function 不再是 cancellable 的, 保留这个 concept 名称是出于接口兼容性考虑
+ */
+template <typename T>
+concept cancellable = with_cancel<T>;
 
 struct return_void_mixin {
   [[no_unique_address]] value_storage<void> retval;
@@ -387,53 +436,6 @@ struct next_awaitable {
     return _next;
   }
   void await_resume() const noexcept {}
-};
-
-struct guarded_co_handle {
-  std::coroutine_handle<> h;
-
- public:
-  guarded_co_handle() noexcept = default;
-  guarded_co_handle(nullptr_t) noexcept {}
-
-  template <typename PromiseT>
-  guarded_co_handle(std::coroutine_handle<PromiseT> h) noexcept : h{h} {}
-
-  ~guarded_co_handle() {
-    if (h) {
-      h.destroy();
-    }
-  }
-
-  guarded_co_handle(guarded_co_handle&& other) noexcept : h{other.h} {
-    other.h = nullptr;
-  }
-
-  guarded_co_handle& operator=(guarded_co_handle&& other) noexcept {
-    if (this == std::addressof(other)) {
-      return *this;
-    }
-    if (h) {
-      h.destroy();
-    }
-    h = other.h;
-    other.h = nullptr;
-    return *this;
-  }
-
-  std::coroutine_handle<> release() noexcept {
-    const auto temp_h = h;
-    h = nullptr;
-    return temp_h;
-  }
-
-  std::coroutine_handle<> get() const noexcept {
-    return h;
-  }
-
-  operator bool() const noexcept {
-    return (bool)h;
-  }
 };
 
 /**
@@ -681,6 +683,7 @@ struct choose_ptr<false, T> {
  * @brief 可取消的函数包装器
  * * 封装了“执行逻辑”和“取消逻辑”的函数对象。
  * 用于提交给支持取消操作的 Executor。
+ * @warning 传入的 cancel 操作必须满足**幂等性**; 不要求线程安全。
  */
 template <bool Copyable, typename R, typename... Args>
 struct cancellable_function_ {
@@ -695,8 +698,24 @@ struct cancellable_function_ {
   struct derived_with_cancel : public base {
     F _func;
     C _cancel;
+    /**
+     * @warning 传入的 cancel 操作必须满足**幂等性**; 不要求线程安全。
+     */
     derived_with_cancel(F&& func, C&& cancel)
         : _func(std::forward<F>(func)), _cancel(std::forward<C>(cancel)) {}
+    
+    ~derived_with_cancel() {
+      cancel();
+    }
+    // 取决于 F 和 C
+    derived_with_cancel(const derived_with_cancel &other) = default;
+    // 取决于 F 和 C
+    derived_with_cancel(derived_with_cancel &&other) = default;
+    // 取决于 F 和 C
+    derived_with_cancel &operator=(const derived_with_cancel &other) = default;
+    // 取决于 F 和 C
+    derived_with_cancel &operator=(derived_with_cancel &&other) = default;
+
     R operator()(Args ...args) override {
       return std::invoke(_func, std::forward<Args>(args)...);
     }
@@ -717,10 +736,26 @@ struct cancellable_function_ {
   };
 
   template <std::invocable<Args...> F>
-    requires std::convertible_to<std::invoke_result_t<F, Args...>, R> && cancellable<F>
+    requires std::convertible_to<std::invoke_result_t<F, Args...>, R> && with_cancel<F>
   struct derived_cancellable : public base {
     F _func;
+    /**
+     * @warning func.cancel() 必须满足**幂等性**。不要求线程安全。
+     */
     derived_cancellable(F&& func) : _func(std::forward<F>(func)) {}
+
+    ~derived_cancellable() {
+      cancel();
+    }
+    // 取决于 F
+    derived_cancellable(const derived_cancellable &other) = default;
+    // 取决于 F
+    derived_cancellable(derived_cancellable &&other) = default;
+    // 取决于 F
+    derived_cancellable &operator=(const derived_cancellable &other) = default;
+    // 取决于 F
+    derived_cancellable &operator=(derived_cancellable &&other) = default;
+
     R operator()(Args ...args) override {
       return std::invoke(_func, std::forward<Args>(args)...);
     }
@@ -752,10 +787,6 @@ struct cancellable_function_ {
   R operator()(Args... args) {
     return ptr->operator()(std::forward<Args>(args)...);
   }
-
-  void cancel() {
-    ptr->cancel();
-  }
 };
 
 template <typename R, typename... Args>
@@ -764,38 +795,77 @@ using cancellable_function = cancellable_function_<false, R, Args...>;
 template <typename R, typename... Args>
 using copyable_cancellable_function = cancellable_function_<true, R, Args...>;
 
-template <typename T, typename Op, stream_with_op<T, Op> Stream>
-auto to_function(to_execute_t<T, Op, Stream> to_execute) {
-  std::coroutine_handle<> h = to_execute.h;
-  return cancellable_function<void>([f = std::move(to_execute)]() { f(); },  // execute
-                                    [h]() {                                  // cancel
-                                      if (h) {
-                                        h.destroy();
-                                      }
-                                    });
-}
-
 template <typename Executor>
 struct execute_by_awaitable {
-  Executor& executor;
+  Executor executor;
   bool await_ready() const noexcept {
     return false;
   }
   void await_suspend(std::coroutine_handle<> h) {
-    executor(cancellable_function<void>::derived_with_cancel{[=]() { h.resume(); },
-                                                             [=]() { h.destroy(); }});
+    executor(cancellable_function<void>::derived_without_cancel{
+        [gh = guarded_co_handle{h}]() mutable { gh.release().resume(); }});
   }
   void await_resume() const noexcept {}
+};
+
+template <typename Executor>
+struct execute_by_awaitable_shared {
+  Executor executor;
+  bool await_ready() const noexcept {
+    return false;
+  }
+  void await_suspend(std::coroutine_handle<> h) {
+    executor(cancellable_function<void>::derived_without_cancel{
+        [sh = std::make_shared<guarded_co_handle>(h)]() {
+          if (*sh) {
+            sh->release().resume(); // 具有幂等性, 不具有线程安全性
+          }
+        }});
+  }
+  void await_resume() const noexcept {}
+};
+
+template <typename Executor>
+struct require_copyable {
+  struct _cannot_accept_move_only_closure {};
+  Executor executor;
+  explicit require_copyable(Executor&& executor) : executor{std::forward<Executor>(executor)} {}
+  
+  template <typename ...Args>
+  decltype(auto) operator()(Args&& ...args) {
+    return std::invoke(std::forward<Executor>(executor), std::forward<Args>(args)...);
+  }
+};
+
+template <typename Executor>
+require_copyable(Executor &&executor) -> require_copyable<Executor>;
+
+template <typename Executor>
+concept cannot_accept_move_only = requires (Executor e) {
+  typename Executor::_cannot_accept_move_only_closure;
 };
 
 /**
  * @brief 切换执行上下文 (Awaitable Helper)
  * * 用法: `co_await async::execute_by(executor);`
  * * 行为: 挂起当前协程，将 resume 动作打包提交给目标 executor, 实现线程/上下文切换。
+ * @note 这个版本适用于 executor 支持 move-only 闭包的情形
  */
 template <typename Executor>
-auto execute_by(Executor& executor) {
-  return execute_by_awaitable{executor};
+  requires (!cannot_accept_move_only<Executor>)
+auto execute_by(Executor&& executor) {
+  return execute_by_awaitable<Executor>{executor};
+}
+
+/**
+ * @brief 切换执行上下文 (Awaitable Helper)
+ * * 用法: `co_await async::execute_by(executor);`
+ * * 行为: 挂起当前协程，将 resume 动作打包提交给目标 executor, 实现线程/上下文切换。
+ * @note 这个版本适用于 executor 要求闭包可拷贝的情形, 比如要求接收 std::function
+ */
+template <cannot_accept_move_only Executor>
+auto execute_by(Executor&& executor) {
+  return execute_by_awaitable_shared<Executor>{executor};
 }
 
 struct trivial_executor_t {
@@ -824,12 +894,11 @@ struct async_call_t {
       return false;
     }
     void await_suspend(std::coroutine_handle<> h) {
-      executor(cancellable_function<void>::derived_with_cancel(
-          [this, h, f = std::move(f)]() {
+      executor(cancellable_function<void>::derived_without_cancel{
+          [this, gh = guarded_co_handle{h}, f = std::move(f)]() mutable {
             retval.execute([&]() -> decltype(auto) { return f(); });  // sync call
-            h.resume();
-          },
-          [h]() { h.destroy(); }));
+            gh.release().resume();
+          }});
     }
     ret_t await_resume() {
       return std::move(retval).get();

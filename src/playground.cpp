@@ -1196,7 +1196,7 @@ void try_await6() {
     subtasks.reserve(M);
     for (int i = 0; i < M; i++) {
       subtasks.emplace_back([](std::vector<int> &nums, auto& worker) -> async::co_task_with<long long> {
-        co_await async::execute_by(worker); // worker is valid until suspend
+        co_await async::execute_by(async::require_copyable{worker}); // worker is valid until suspend
         co_return std::ranges::fold_left(nums, (long long)0, std::plus<long long>{});
       }(nums, worker).get_future());
     }
@@ -1332,7 +1332,7 @@ void try_await10() {
       subtasks.emplace_back([](std::vector<int> &nums, auto& worker) -> async::co_task_with<long long> {
         co_return co_await async::lift([&]() {
           return std::ranges::fold_left(nums, (long long)0, std::plus<long long>{});
-        }).on(worker);
+        }).on(async::require_copyable{worker});
       }(nums, worker).get_future());
     }
 

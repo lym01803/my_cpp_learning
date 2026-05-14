@@ -203,7 +203,7 @@ class runner {
   }
 
   void drain() {
-    if constexpr (async::cancellable<F>) {
+    if constexpr (async::with_cancel<F>) {
       while (!queue.empty()) {
         auto task = queue.try_pop();
         if (task.has_value()) {
