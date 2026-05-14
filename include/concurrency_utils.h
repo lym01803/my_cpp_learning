@@ -166,8 +166,8 @@ class sync_stream {
   }
 
   template <typename Op, typename Executor>
-  auto get_dispatcher(Op op, Executor& executor) {
-    return async::dispatcher<msg_t, Op, sync_stream, Executor>{*this, executor};
+  auto get_dispatcher(Op op, Executor&& executor) {
+    return async::make_dispatcher<msg_t, Op>(*this, std::forward<Executor>(executor));
   }
 
  private:

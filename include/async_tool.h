@@ -190,13 +190,14 @@ struct write_stream {
  */
 template <typename T, typename Op, stream_with_op<T, Op> Stream, typename Executor>
 class dispatcher {
-  Stream& stream;
-  Executor& executor;
+  Stream stream;
+  Executor executor;
 
  public:
   struct awaitable;
 
-  dispatcher(Stream& _stream, Executor& _executor) : stream{_stream}, executor{_executor} {}
+  dispatcher(Stream&& _stream, Executor&& _executor)
+      : stream{std::forward<Stream>(_stream)}, executor{std::forward<Executor>(_executor)} {}
 
   /**
    * @brief 生成等待对象
@@ -207,6 +208,12 @@ class dispatcher {
     return awaitable{.stream = stream, .executor = executor, .data = {std::forward<U>(data)}};
   }
 };
+
+template <typename T, typename Op, stream_with_op<T, Op> Stream, typename Executor>
+auto make_dispatcher(Stream &&stream, Executor &&executor) {
+  return dispatcher<T, Op, Stream, Executor>{std::forward<Stream>(stream),
+                                             std::forward<Executor>(executor)};
+}
 
 /**
  * @brief 内部执行包 (Design Note)
@@ -252,7 +259,7 @@ struct dispatcher<T, Op, Stream, Executor>::awaitable {
   using storage_t = value_storage<retval_t>;
   [[no_unique_address]] storage_t retval;
 
-  using _to_execute_t = to_execute_t<T, Op, Stream>;
+  using _to_execute_t = to_execute_t<T, Op, std::remove_reference_t<Stream>>;
 
   bool await_ready() const noexcept {
     return false;
