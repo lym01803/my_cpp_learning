@@ -271,4 +271,8 @@ void try_await13();
 
 void try_await14();
 
+void try_await15();
+
+void try_await16();
+
 }  // namespace playground

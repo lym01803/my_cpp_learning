@@ -22,6 +22,7 @@
 #include <random>
 #include <ranges>
 #include <ratio>
+#include <semaphore>
 #include <shared_mutex>
 #include <stdexcept>
 #include <stop_token>
@@ -1571,6 +1572,57 @@ void try_await14() {
     );
     std::cout << std::get<1>(results).get() << std::endl;
   }(sleep_task).get_future().get();
+}
+
+void try_await15() {
+  auto sleep_for = [](int ms) {
+    return async::lift([=]() {
+             std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+             return ms;
+           }).on(async::trivial_executor);
+  };
+
+  auto sleep_task = [](decltype(sleep_for)& sleep_for) -> async::co_task {
+    auto result = co_await async::any(
+        std::from_range, std::vector<int>{250, 1000, 500, 750} | std::views::transform(sleep_for));
+    std::cout << std::format("Id: {} first finished; sleep for {} ms; ", result.index, result.value.get());
+    std::cout << std::endl;
+  }(sleep_for);
+
+  sleep_task.get_future().get();
+}
+
+void try_await16() {
+  auto timeout = [](int ms) {
+    return async::lift([=]() {
+      std::this_thread::sleep_for(std::chrono::milliseconds{ms});
+    }).on(async::trivial_executor);
+  };
+
+  using signal_t = std::shared_ptr<std::binary_semaphore>;
+  signal_t signal = std::make_shared<std::binary_semaphore>(0);
+  std::stop_source stop;
+
+  playground::runner<async::cancellable_function<void>> worker;
+
+  auto wait_for = [](signal_t signal, std::stop_token token, 
+    decltype(worker)& worker) -> async::co_task {
+    std::stop_callback callback{token, [&signal]() { signal->release(); }};
+    co_await async::lift([&signal]() { signal->acquire(); }).on(worker);
+    std::cout << "Wake up\n" << std::flush;
+  }(signal, stop.get_token(), worker);
+
+  [](std::stop_source stop, decltype(timeout)& timeout, 
+    decltype(wait_for)& wait_for) -> async::co_task {
+    const auto result = co_await async::any(
+      std::move(wait_for),
+      [](decltype(timeout)& timeout, std::stop_source stop) -> async::co_task {
+        co_await timeout(1000);
+        stop.request_stop();
+      }(timeout, stop)
+    );
+    std::cout << std::format("Idx {} finished first.\n", result.index) << std::flush;
+  }(stop, timeout, wait_for).get_future().get();
 }
 
 }  // namespace playground
